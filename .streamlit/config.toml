@@ -1,0 +1,17 @@
+# 433 huisstijl: zwart, wit, neon-geel accent. Koppen breed (Organetto; Unbounded als vervanger), tekst Inter.
+[theme]
+base = "dark"
+primaryColor = "#E1FF00"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#141414"
+textColor = "#FFFFFF"
+borderColor = "#262626"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Unbounded:https://fonts.googleapis.com/css2?family=Unbounded:wght@600;800&display=swap"
+baseRadius = "0.75rem"
+
+[theme.sidebar]
+backgroundColor = "#0b0b0b"
+
+[browser]
+gatherUsageStats = false
