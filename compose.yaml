@@ -1,0 +1,18 @@
+services:
+  schedule:
+    image: schedule
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+
+    command: ["streamlit", "run", "src/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+    volumes:
+      # Team, kalender en rooster blijven op je laptop staan (en overleven een rebuild).
+      - ./data:/app/data
+
+    ports:
+      # Host-poort 8503: 8501/8502 worden al gebruikt door andere lokale projecten.
+      - 8503:8501
