@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(data/**)",
+      "Read(test_logos/**)",
+      "Edit(data/**)",
+      "Edit(test_logos/**)",
+      "Bash(python config.py*)",
+      "Bash(python src/config.py*)",
+      "Bash(python -m config*)",
+      "Bash(streamlit run *)",
+      "Bash(docker compose up*)",
+      "Bash(docker compose run*)",
+      "Bash(docker compose exec*)",
+      "Bash(docker-compose up*)",
+      "Bash(docker-compose run*)",
+      "PowerShell(python config.py*)",
+      "PowerShell(python src/config.py*)",
+      "PowerShell(streamlit run *)",
+      "PowerShell(docker compose up*)",
+      "PowerShell(docker compose run*)",
+      "PowerShell(docker compose exec*)"
+    ]
+  }
+}
