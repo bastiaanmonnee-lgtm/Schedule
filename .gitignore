@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+# Bevat namen van teamleden
+data/
+test_logos/
+.env
