@@ -91,8 +91,8 @@ with st.sidebar:
     st.divider()
     st.caption("All changes are saved automatically in the `data/` folder.")
 
-t_matches, t_team, t_weeks, t_rules, t_absence, t_roster = st.tabs(
-    ["⚽ Matches", "👥 Team", "📅 Weeks & staffing", "⚙️ Staffing rules", "🏖️ Time off", "🗓️ Schedule"]
+t_matches, t_events, t_team, t_weeks, t_rules, t_absence, t_roster = st.tabs(
+    ["⚽ Matches", "⭐ Special events", "👥 Team", "📅 Weeks & staffing", "⚙️ Staffing rules", "🏖️ Time off", "🗓️ Schedule"]
 )
 
 # --- Team ----------------------------------------------------------------------------
@@ -213,6 +213,25 @@ with t_rules:
     if new_settings != settings:
         storage.save_settings(new_settings)
     settings = new_settings
+
+# --- Special events ----------------------------------------------------------------
+
+with t_events:
+    st.subheader("Special events")
+    st.caption("Events show up on their day in the match calendar.")
+    events = st.data_editor(
+        base("events", storage.load_events),
+        key=editor_key("events"),
+        num_rows="dynamic",
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "titel": st.column_config.TextColumn("Title", required=True),
+            "datum": st.column_config.DateColumn("Day", format="DD-MM-YYYY", required=True),
+        },
+    )
+    events = storage.clean_events(events)
+    persist("events", events)
 
 # --- Afwezigheid ---------------------------------------------------------------------
 
@@ -349,21 +368,13 @@ def load_logo_urls(ids: tuple[int, ...]) -> dict[int, str]:
     return logos.logo_urls(ids)  # links zijn langer geldig (logos.LINK_HOURS) dan de cache
 
 
-with t_matches:
-    m1, m2 = st.columns([4, 1], vertical_alignment="bottom")
-    saved_clubs = settings.get("clubs", matches.DEFAULT_CLUBS)
-    clubs = m1.multiselect(
-        "Clubs", sorted(set(saved_clubs) | set(matches.DEFAULT_CLUBS)), default=saved_clubs,
-        accept_new_options=True, placeholder="Type a club and press Enter",
-        help="Searches home and away teams. Type a new club to add it.",
-    )
-    if clubs != saved_clubs:
-        settings = {**settings, "clubs": clubs}
-        storage.save_settings(settings)
-    if m2.button("🔄 Refresh", help="Reload from the database (otherwise at most 1 hour old)"):
-        load_matches.clear()
-        load_logo_urls.clear()
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_league_logo_urls(assets: tuple[str, ...]) -> dict[str, str]:
+    return logos.league_logo_urls(assets)
 
+
+with t_matches:
+    clubs = matches.DEFAULT_CLUBS
     found = None
     if not clubs:
         st.info("Pick at least one club.")
@@ -375,10 +386,7 @@ with t_matches:
 
     if found is not None:
         names = matches.team_names(found, clubs)
-        teams = st.multiselect(
-            "Teams", names, default=matches.default_teams(names, clubs),
-            help="All teams with these names in the period; untick the ones that aren't the club (e.g. youth or women's teams).",
-        )
+        teams = matches.default_teams(names, clubs)
         games = matches.for_teams(found, teams)
 
         logo_ids = tuple(sorted({i for g in games.itertuples() for side in matches.logo_candidates(g) for i in side}))
@@ -388,32 +396,21 @@ with t_matches:
             urls = {}
             st.warning(f"Logos could not be loaded, showing initials instead: {type(exc).__name__}: {exc}")
 
-        teams_in_view = {
-            name: ids for g in games.itertuples()
-            for name, ids in zip((g.HomeTeam, g.AwayTeam), matches.logo_candidates(g))
-        }
-        with_logo = sum(any(i in urls for i in ids) for ids in teams_in_view.values())
-        # Alleen tonen als er logo's ontbreken.
-        if with_logo < len(teams_in_view):
-            with st.expander(f"🖼️ Logos: {with_logo} of {len(teams_in_view)} clubs found"):
-                st.caption(f"Looked up in `{logos.CONTAINER}/{logos.PREFIX}{{id}}.png`, team id first, then logo id.")
-                st.dataframe(
-                    pd.DataFrame(
-                        [{"Club": name, "Tried": ", ".join(f"{i}.png" for i in ids),
-                          "Found": "✅" if any(i in urls for i in ids) else "–"} for name, ids in teams_in_view.items()]
-                    ),
-                    hide_index=True, width="stretch",
-                )
-                if st.button("Show example file names in the folder"):
-                    try:
-                        st.code("\n".join(logos.sample_names()) or "(folder is empty)")
-                    except Exception as exc:
-                        st.error(f"{type(exc).__name__}: {exc}")
+        # Competitielogo's (LeagueLogoAsset) voor de achtergrond van Europa League- en Nations League-dagen.
+        league_assets = tuple(sorted({
+            str(g.LeagueLogoAsset).strip() for g in games.itertuples()
+            if calendar_view.competition_of(g.competitie) and logos.league_blob(g.LeagueLogoAsset)
+        }))
+        try:
+            league_urls = load_league_logo_urls(league_assets) if league_assets else {}
+        except Exception:  # geen competitielogo's: dan alleen de kleur
+            league_urls = {}
 
         st.html(
             calendar_view.render(
                 games, period, dict(zip(calendar["datum"], calendar["dagtype"])), urls,
-                now=pd.Timestamp.now(tz=matches.LOCAL_TZ).to_pydatetime(), clubs=clubs,
+                now=pd.Timestamp.now(tz=matches.LOCAL_TZ).to_pydatetime(), clubs=clubs, league_urls=league_urls,
+                events=events.groupby("datum")["titel"].apply(list).to_dict(),
             )
         )
 
