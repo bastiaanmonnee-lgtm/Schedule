@@ -73,6 +73,7 @@ EMPTY = {
     "kalender": ["datum", "dagtype", "notitie"],
     "afwezigheid": ["naam", "van", "tot", "reden"],
     "rooster": ["datum", "dienst", "naam"],
+    "events": ["titel", "datum"],
 }
 
 
@@ -160,6 +161,14 @@ def clean_absences(df: pd.DataFrame) -> pd.DataFrame:
     return df[(df["naam"] != "")].dropna(subset=["van"]).reset_index(drop=True)
 
 
+def clean_events(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["titel"] = _text(df["titel"])
+    df["datum"] = _dates(df["datum"])
+    df = df[df["titel"] != ""].dropna(subset=["datum"])
+    return df.sort_values("datum").reset_index(drop=True)
+
+
 def clean_roster(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["datum"] = _dates(df["datum"])
@@ -190,6 +199,10 @@ def load_calendar():
 
 def load_absences():
     return clean_absences(_read("afwezigheid", pd.DataFrame(columns=EMPTY["afwezigheid"])))
+
+
+def load_events():
+    return clean_events(_read("events", pd.DataFrame(columns=EMPTY["events"])))
 
 
 def load_roster():
