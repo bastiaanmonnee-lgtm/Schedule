@@ -16,6 +16,7 @@ from pathlib import Path
 import pandas as pd
 
 import matches
+import scheduler as sch
 
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
@@ -60,7 +61,18 @@ CSS = """
 .mc-week-label .mc-display { font-size:1.05rem; }
 .mc-week-label span.range { color:var(--y); font-family:var(--display); font-weight:600; font-size:.8rem; }
 .mc-grid { display:grid; grid-template-columns:repeat(7, minmax(0,1fr)); gap:8px; }
-.mc-day { position:relative; overflow:hidden; border:1px solid var(--line); border-radius:14px; padding:10px;
+.mc-grid.with-hours { grid-template-columns:repeat(7, minmax(0,1fr)) 128px; }
+/* Uren per persoon die week vs. contracturen: rood = minder, oranje = meer */
+.mc-hours { border:1px solid var(--line); border-radius:14px; padding:8px; background:var(--card); font-size:.64rem; }
+.mc-hours-title { color:var(--grey); font-size:.55rem; font-weight:700; text-transform:uppercase; letter-spacing:.08em;
+                  margin-bottom:6px; }
+.mc-hours-row { display:flex; justify-content:space-between; gap:4px; padding:2px 5px; margin-top:2px; border-radius:5px; }
+.mc-hours-row span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mc-hours-row b { white-space:nowrap; font-weight:700; }
+.mc-hours-ok { color:var(--grey); font-size:.62rem; }
+.mc-hours-row.under { background:rgba(255,80,80,.18); color:#ff8a8a; }
+.mc-hours-row.over { background:rgba(255,140,0,.2); color:#ffae42; }
+.mc-day { position:relative; overflow:hidden; border:1px solid var(--line); border-radius:14px; padding:8px;
           min-height:124px; background:var(--card); }
 .mc-day > * { position:relative; z-index:1; }
 .mc-day.weekend { background:var(--card2); }
@@ -84,6 +96,8 @@ CSS = """
 .mc-day.euro::after { content:""; position:absolute; left:50%; top:58%; width:88%; aspect-ratio:1;
                       transform:translate(-50%, -50%) rotate(-12deg);
                       background:var(--logo) center / contain no-repeat; opacity:.2; z-index:0; }
+/* Alleen de Champions League-sterrenbal staat schuin; de andere logo's recht */
+.mc-day.euro:not(.ucl)::after { transform:translate(-50%, -50%); }
 .mc-day.euro .mc-dow { color:var(--soft); }
 .mc-day.euro .mc-type { display:flex; align-items:center; gap:5px; color:#fff; font-weight:700; text-transform:uppercase;
                         letter-spacing:.06em; font-size:.6rem; }
@@ -106,7 +120,7 @@ CSS = """
 .mc-card { border-radius:10px; padding:6px; margin-top:6px; background:#1d1d1d; border:1px solid #2c2c2c;
            transition:border-color .15s; }
 .mc-card:hover { border-color:var(--y); }
-.mc-time { font-family:var(--display); font-weight:800; font-size:.72rem; color:var(--y); }
+.mc-time { font-family:var(--display); font-weight:800; font-size:.66rem; color:var(--y); }
 .mc-logos { display:flex; align-items:center; justify-content:center; gap:6px; }
 
 .mc-logo { display:inline-flex; align-items:center; justify-content:center; object-fit:contain; flex:none; }
@@ -126,6 +140,53 @@ CSS = """
 .mc-day.event .mc-card { background:rgba(0,0,0,.08); border-color:rgba(0,0,0,.25); }
 .mc-day.event .mc-card:hover { border-color:#000; }
 .mc-day.event.today { border-color:#000; }
+/* Rooster per dag: wie werkt er (dag/avond), met een label per kanaal */
+.mc-day { display:flex; flex-direction:column; }
+/* Per dienst een rij: links wie er werkt, rechts de wedstrijden in die dienst; lijnen ertussen */
+.mc-shift { display:grid; grid-template-columns:minmax(0, .85fr) minmax(0, 1fr); gap:5px; padding:7px 0; }
+.mc-shift + .mc-shift { border-top:1px solid rgba(255,255,255,.16); }
+.mc-shift:last-of-type { padding-bottom:0; flex:1; }  /* laatste dienst loopt door tot onderaan het vak */
+.mc-shift-crew { display:flex; flex-direction:column; align-items:flex-start; gap:3px; min-width:0; }
+.mc-shift-crew .mc-chip { max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+.mc-shift-games { min-width:0; }
+.mc-shift-games > .mc-card:first-child { margin-top:0; }
+.mc-shift .mc-card { padding:4px 2px; overflow:hidden; }
+.mc-shift .mc-time { font-size:.6rem; }
+.mc-shift .mc-logos { gap:2px; }
+.mc-day.euro .mc-shift + .mc-shift, .mc-day.nl .mc-shift + .mc-shift { border-color:rgba(255,255,255,.25); }
+.mc-day.event .mc-shift + .mc-shift { border-color:rgba(0,0,0,.25); }
+.mc-crew-shift { width:100%; color:var(--grey); font-size:.55rem; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
+.mc-chip { display:inline-flex; align-items:center; gap:3px; padding:2px 5px 2px 3px; border-radius:5px;
+           background:rgba(255,255,255,.09); font-size:.62rem; font-weight:600; white-space:nowrap; }
+.mc-chip i { font-style:normal; font-size:.5rem; font-weight:800; padding:1px 3px; border-radius:3px; color:#000; }
+.c-main i { background:#fff; }
+.c-app i { background:var(--y); }
+.c-nl i { background:#ff7a00; }
+.mc-day.euro .mc-crew-shift, .mc-day.nl .mc-crew-shift { color:rgba(255,255,255,.75); }
+.mc-day.euro .mc-chip, .mc-day.nl .mc-chip { background:rgba(0,0,0,.3); }
+.mc-day.event .mc-crew-shift, .mc-day.event .mc-chip { color:#000; }
+.mc-day.event .mc-chip { background:rgba(0,0,0,.1); }
+.mc-day.event .c-app i { background:#000; color:var(--y); }
+/* Slepen */
+.mc-chip[draggable="true"] { cursor:grab; }
+.mc-chip.dragging { opacity:.4; }
+.mc-day.over { outline:2px dashed var(--y); outline-offset:-2px; }
+.mc-shift.over { outline:2px dashed var(--y); outline-offset:2px; border-radius:6px;
+                                      background:rgba(225,255,0,.08); }
+.mc-shift-crew { min-height:34px; }
+.mc-chip.bad { box-shadow:0 0 0 1.5px #ff4d4d; background:rgba(255,77,77,.22); }
+.mc-x { margin-left:2px; padding:0 2px; font-weight:700; opacity:.45; cursor:pointer; }
+.mc-x:hover { opacity:1; color:#ff5a5a; }
+.mc-add { padding:0 7px; border:1px dashed rgba(255,255,255,.3); border-radius:5px; color:var(--grey);
+          font-size:.7rem; font-weight:700; line-height:1.4; cursor:pointer; }
+.mc-add:hover { color:var(--y); border-color:var(--y); }
+.mc-day.event .mc-add { color:#000; border-color:rgba(0,0,0,.4); }
+.mc-picker-box { display:flex; flex-direction:column; gap:3px; width:100%; }
+.mc-chip > i { cursor:pointer; }
+.mc-picker { max-width:100%; font:inherit; font-size:.65rem; background:#111; color:#fff;
+             border:1px solid var(--y); border-radius:5px; padding:2px; }
+.mc-legend { display:inline-flex; gap:10px; margin-left:14px; }
+
 .mc-more { cursor:default; text-align:center; color:var(--grey); font-size:.68rem; margin-top:6px; }
 .mc-day.euro .mc-more, .mc-day.nl .mc-more { color:rgba(255,255,255,.7); }
 .mc-empty { text-align:center; color:var(--grey); padding:40px 0; }
@@ -134,10 +195,11 @@ CSS = """
 
 @media (max-width: 900px) {
   .mc { padding:18px; }
-  .mc-grid { grid-template-columns:1fr; }
+  .mc-grid, .mc-grid.with-hours { grid-template-columns:1fr; }
   .mc-day { min-height:0; }
   .mc-day.nogames { display:none; }
   .mc-day.euro::after { width:40%; left:auto; right:-6%; top:50%; transform:translateY(-50%) rotate(-12deg); }
+  .mc-day.euro:not(.ucl)::after { transform:translateY(-50%);}
 }
 </style>
 """
@@ -190,8 +252,8 @@ def _card(g, urls, extra: bool = False) -> str:
     tooltip = f"{g.HomeTeam} – {g.AwayTeam} · {g.competitie or ''}"
     return (
         f'<div class="mc-card{" extra" if extra else ""}" title="{escape(tooltip)}">'
-        f'<div class="mc-logos">{logo(home_ids, g.HomeTeam, urls, 28)}<span class="mc-time">{escape(g.tijd)}</span>'
-        f'{logo(away_ids, g.AwayTeam, urls, 28)}</div></div>'
+        f'<div class="mc-logos">{logo(home_ids, g.HomeTeam, urls, 20)}<span class="mc-time">{escape(g.tijd)}</span>'
+        f'{logo(away_ids, g.AwayTeam, urls, 20)}</div></div>'
     )
 
 
@@ -204,10 +266,92 @@ def _league_logo(day_games, competition, league_urls: dict[str, str]) -> str | N
     return None
 
 
+CHANNEL_NAMES = {"main": "Main", "app": "App", "nl": "NL"}
+SHORT = {"main": "M", "app": "A", "nl": "NL"}
+
+
+def _chips(group: pd.DataFrame | None, flags: dict | None = None) -> str:
+    """Namen met een label voor het kanaal, in de volgorde main, app, NL. Te verslepen naar een andere dienst."""
+    if group is None or group.empty:
+        return ""
+    order = {c: i for i, c in enumerate(CHANNEL_NAMES)}
+    flags = flags or {}
+    return "".join(
+        f'<span class="mc-chip c-{escape(r.kanaal)}{" bad" if (r.datum, r.naam) in flags else ""}" '
+        f'title="{escape(" / ".join(flags.get((r.datum, r.naam), [])) or CHANNEL_NAMES.get(r.kanaal, r.kanaal))}" '
+        f'draggable="true" data-name="{escape(r.naam)}" data-date="{r.datum.isoformat()}" '
+        f'data-shift="{escape(r.dienst)}" data-channel="{escape(r.kanaal)}">'
+        f'<i>{SHORT.get(r.kanaal, "?")}</i>{escape(r.naam)}<b class="mc-x" title="Remove from this shift">×</b></span>'
+        for r in sorted(group.itertuples(), key=lambda r: (order.get(r.kanaal, 9), r.naam))
+    )
+
+
+def game_shift(kickoff: str) -> str:
+    """In welke dienst valt de aftrap? Voor 09:00 is het nacht (na de avonddienst)."""
+    if kickoff < "09:00":
+        return sch.NIGHT
+    return sch.shift_for_kickoff(kickoff)
+
+
+def _shift_rows(day: date, day_roster: pd.DataFrame | None, cards: list[tuple[str, str]],
+                flags: dict | None = None) -> str:
+    """Per dienst een rij: links de mensen, rechts de wedstrijden die in die dienst vallen."""
+    crew = dict(tuple(day_roster.groupby("dienst"))) if day_roster is not None else {}
+    rows = []
+    for shift in (sch.NIGHT, sch.DAY, sch.EVENING, *sorted(set(crew) - {sch.NIGHT, sch.DAY, sch.EVENING})):
+        shift_cards = [html for s, html in cards if s == shift]
+        if shift == sch.NIGHT and not shift_cards and crew.get(shift) is None:
+            continue
+        games_html = "".join(shift_cards)
+        drop = f' data-drop-date="{day.isoformat()}" data-drop-shift="{escape(shift)}"'
+        add = '<span class="mc-add" title="Add someone to this shift">+</span>'
+        rows.append(
+            f'<div class="mc-shift"{drop}><div class="mc-shift-crew">'
+            f'<span class="mc-crew-shift">{escape(shift)}</span>'
+            f'{_chips(crew.get(shift), flags)}{add}</div><div class="mc-shift-games">{games_html}</div></div>'
+        )
+    return "".join(rows)
+
+
+def _hours(week_start: date, roster: pd.DataFrame | None, contracts: dict[str, int],
+           shift_hours: dict[str, float], away: dict[str, set[date]]) -> str:
+    """Per persoon de ingeplande uren in deze week naast de contracturen.
+
+    Wie de hele week weg is (vrij, of bij een ander team zoals WomenFC), telt niet mee.
+    """
+    week_days = {week_start + timedelta(days=i) for i in range(7)}
+    contracts = {n: c for n, c in contracts.items() if not week_days <= away.get(n, set())}
+    worked: dict[str, float] = {}
+    if roster is not None:
+        for r in roster[roster["datum"].isin(week_days)].itertuples():
+            worked[r.naam] = worked.get(r.naam, 0) + shift_hours.get(r.dienst, 0)
+    rows = []
+    for name in list(contracts) + [n for n in worked if n not in contracts]:
+        hours, contract = worked.get(name, 0), contracts.get(name, 0)
+        if not contract or hours == contract:
+            continue  # alleen wie meer of minder uren heeft dan het contract
+        status = " under" if hours < contract else " over"
+        value = f"{hours:g}/{contract}" if contract else f"{hours:g}"
+        rows.append(f'<div class="mc-hours-row{status}" title="{escape(name)}: {hours:g} h scheduled'
+                    f'{f", contract {contract} h" if contract else ""}"><span>{escape(name)}</span><b>{value}</b></div>')
+    if not any(contracts.values()):
+        body = '<div class="mc-hours-ok">No contract hours set yet: fill them in under Employees.</div>'
+    else:
+        body = "".join(rows) or '<div class="mc-hours-ok">Everyone on contract ✓</div>'
+        missing = sum(1 for n in contracts if not contracts[n] and worked.get(n))
+        if missing:
+            body += f'<div class="mc-hours-ok">{missing} without contract hours</div>'
+    return '<div class="mc-hours"><div class="mc-hours-title">Hours / contract</div>' + body + "</div>"
+
+
 def render(games: pd.DataFrame, period: list[date], day_types: dict[date, str],
            urls: dict[int, str], now: datetime, clubs: list[str], league_urls: dict[str, str] | None = None,
-           events: dict[date, list[str]] | None = None) -> str:
-    if games.empty and not any(d in (events or {}) for d in period):
+           events: dict[date, list[str]] | None = None, roster: pd.DataFrame | None = None,
+           contracts: dict[str, int] | None = None,
+           shift_hours: dict[str, float] | None = None, away: dict[str, set[date]] | None = None,
+           flags: dict | None = None) -> str:
+    crew_by_day = {d: g for d, g in roster.groupby("datum")} if roster is not None and not roster.empty else {}
+    if games.empty and roster is None and not any(d in (events or {}) for d in period):
         return CSS + f'<div class="mc"><div class="mc-empty">No matches in this period.</div></div>'
 
     by_day = {d: list(g.itertuples()) for d, g in games.groupby("datum")}
@@ -227,7 +371,7 @@ def render(games: pd.DataFrame, period: list[date], day_types: dict[date, str],
         parts.append(
             f'<div class="mc-week"><div class="mc-week-label"><span class="mc-display">Week {week_start.isocalendar()[1]}</span>'
             f'<span class="range">{week_start.day} {MONTHS[week_start.month - 1]} – {week_end.day} {MONTHS[week_end.month - 1]}</span></div>'
-            '<div class="mc-grid">'
+            f'<div class="mc-grid{" with-hours" if contracts else ""}">'
         )
         for offset in range(7):
             d = week_start + timedelta(days=offset)
@@ -256,7 +400,9 @@ def render(games: pd.DataFrame, period: list[date], day_types: dict[date, str],
                 classes.append("today")
             elif d < now.date():
                 classes.append("past")
-            if not day_games and not day_events:
+            day_roster = crew_by_day.get(d)
+            crew = roster is not None  # met rooster: altijd rijen per dienst, zodat je er iemand heen kunt slepen
+            if not day_games and not day_events and not crew:
                 classes.append("nogames")
             # Alleen tekst op speciale dagen (event, Nederland, Champions League, ...), niet het gewone dagtype.
             # Bijvoorbeeld 'Champions League / Ballon d'Or' als een event op een speciale speeldag valt.
@@ -266,14 +412,21 @@ def render(games: pd.DataFrame, period: list[date], day_types: dict[date, str],
             top = {id(g) for g in sorted(day_games, key=lambda g: matches.game_popularity(g, clubs))[:MAX_PER_DAY]}
             hidden = len(day_games) - len(top)
             more = f'<div class="mc-more">+{hidden} more</div>' if hidden else ""
+            ordered = sorted(day_games, key=lambda g: g.aftrap)
+            day_drop = f' data-drop-date="{d.isoformat()}"' if crew else ""  # hele dagvak: iemand erheen slepen
             parts.append(
-                f'<div class="{" ".join(classes)}"{style}><div class="mc-day-head">'
+                f'<div class="{" ".join(classes)}"{style}{day_drop}><div class="mc-day-head">'
                 f'<span class="mc-dow">{DAYS[d.weekday()]}</span>'
                 f'<span class="mc-date">{d.day:02d}</span></div>{day_type}'
 
-                + "".join(_card(g, urls, extra=id(g) not in top) for g in sorted(day_games, key=lambda g: g.aftrap))
+                + (_shift_rows(d, day_roster, [(game_shift(g.tijd), _card(g, urls, extra=id(g) not in top)) for g in ordered], flags)
+                   if crew else "".join(_card(g, urls, extra=id(g) not in top) for g in ordered))
                 + more + "</div>"
             )
+        if contracts:
+            parts.append(_hours(week_start, roster, contracts, shift_hours or {}, away or {}))
         parts.append("</div></div>")
-    parts.append('<div class="mc-foot"><span>Times in Amsterdam time (CET/CEST)</span><b>433</b></div></div>')
+    legend = "".join(f'<span class="mc-chip c-{c}"><i>{SHORT[c]}</i>{label}</span>' for c, label in CHANNEL_NAMES.items())
+    parts.append(f'<div class="mc-foot"><span>Times in Amsterdam time (CET/CEST)<span class="mc-legend">{legend}</span></span>'
+                 '<b>433</b></div></div>')
     return "".join(parts)

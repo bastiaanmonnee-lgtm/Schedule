@@ -15,3 +15,7 @@ backgroundColor = "#0b0b0b"
 
 [browser]
 gatherUsageStats = false
+
+# Na het opslaan van een bestand in src/ de app automatisch opnieuw draaien (geen F5 nodig).
+[server]
+runOnSave = true

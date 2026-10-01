@@ -13,66 +13,59 @@ DATA_DIR = Path(os.environ.get("DATA_DIR") or Path(__file__).resolve().parent.pa
 
 DEFAULT_SETTINGS = {
     "min_rust_uren": 11,
-    "standaard_doordeweeks": "Regular day",
-    "standaard_weekend": "Eredivisie matchday",
 }
 
+CHANNELS = ["main", "app", "nl"]
+
+TEAM_COLUMNS = [
+    "naam", "seniority", "kanalen", "contracturen", "auto", "max_per_week", "vrije_dagen",
+    "vaste_dienst", "vaste_dagen", "ucl", "actief", "notitie",
+]
+_EMPLOYEES = ["Aniek", "Emily*", "Karel", "Jonathan", "Luuk", "Kadir", "Francisco", "Joshua", "Thijn",
+              "Justin", "Maybel*", "Tim", "Rogier", "Mats", "Thomas*", "Arodi*"]
+_ONLY = {"Kadir": "app", "Francisco": "app", "Luuk": "app", "Jonathan": "main"}
+_MANUAL_ONLY = {"Rogier", "Tim"}  # niet automatisch inroosteren
 DEFAULT_TEAM = pd.DataFrame(
     [
-        ("Example Lead", "Lead", 4, "", True, ""),
-        ("Example Senior 1", "Senior", 5, "", True, ""),
-        ("Example Senior 2", "Senior", 5, "", True, ""),
-        ("Example Medior 1", "Medior", 5, "", True, ""),
-        ("Example Medior 2", "Medior", 5, "", True, ""),
-        ("Example Medior 3", "Medior", 4, "fri", True, "Part-time"),
-        ("Example Junior 1", "Junior", 5, "", True, ""),
-        ("Example Junior 2", "Junior", 3, "mon, tue", True, "Intern"),
+        {
+            "naam": n.rstrip("*"), "seniority": "Intern" if n.rstrip("*") == "Maybel" else "Medior", "kanalen": _ONLY.get(n, "main, app, nl"), "auto": n not in _MANUAL_ONLY,
+            "contracturen": 16 if n == "Thijn" else 40, "max_per_week": 5, "vrije_dagen": "",
+            # Francisco werkt altijd 16:00 - 00:00 en steevast op vrijdag; Rogier staat bij UCL op main.
+            "vaste_dienst": "Evening" if n == "Francisco" else "", "vaste_dagen": "fri" if n == "Francisco" else "",
+            "ucl": n == "Rogier", "actief": True, "notitie": "*" if n.endswith("*") else "",
+        }
+        for n in _EMPLOYEES
     ],
-    columns=["naam", "seniority", "max_per_week", "vrije_dagen", "actief", "notitie"],
+    columns=TEAM_COLUMNS,
+)
+
+# Per maand bij een ander team (bijv. WomenFC): die maand niet in dit rooster.
+DEFAULT_OTHER_TEAM = pd.DataFrame(
+    [("Aniek", "2026-10", "WomenFC"), ("Emily", "2026-10", "WomenFC")],
+    columns=["naam", "maand", "team"],
 )
 
 DEFAULT_SHIFTS = pd.DataFrame(
-    [("Morning", "07:00", "15:00"), ("Afternoon", "13:00", "21:00"), ("Evening", "17:00", "01:00")],
+    # Night: alleen handmatig (bijv. bij wedstrijden na middernacht); de planner vult hem niet.
+    [("Day", "09:00", "17:00"), ("Evening", "16:00", "00:00"), ("Night", "00:00", "09:00")],
     columns=["dienst", "start", "eind"],
 )
 
 _RULES = {
-    # dagtype: {dienst: (aantal, waarvan minimaal senior)}
-    "Regular day": {"Morning": (1, 0), "Afternoon": (1, 0), "Evening": (1, 0)},
-    "Quiet / no football": {"Morning": (1, 0), "Afternoon": (1, 0)},
-    "Eredivisie matchday": {"Morning": (1, 0), "Afternoon": (2, 1), "Evening": (2, 1)},
-    "Big match / derby": {"Morning": (1, 0), "Afternoon": (2, 1), "Evening": (3, 2)},
-    "Champions League": {"Morning": (1, 0), "Afternoon": (2, 1), "Evening": (4, 2)},
-    "Europa / Conference League": {"Morning": (1, 0), "Afternoon": (1, 0), "Evening": (3, 1)},
-    "International break": {"Morning": (1, 0), "Afternoon": (1, 0), "Evening": (2, 1)},
-    "Transfer Deadline Day": {"Morning": (2, 1), "Afternoon": (2, 1), "Evening": (3, 1)},
+    # dagtype: {dienst: (main, app, nl)}
+    "Regular day": {"Day": (1, 1, 1), "Evening": (1, 1, 1)},
+    "Weekend": {"Day": (1, 1, 1), "Evening": (2, 2, 1)},
+    "Champions League": {"Day": (1, 1, 1), "Evening": (2, 2, 1)},  # main: 1 + Rogier
 }
 DEFAULT_RULES = pd.DataFrame(
-    [(dt, d, n, s) for dt, shifts in _RULES.items() for d, (n, s) in shifts.items()],
-    columns=["dagtype", "dienst", "aantal", "min_senior"],
+    [(dt, d, *counts) for dt, shifts in _RULES.items() for d, counts in shifts.items()],
+    columns=["dagtype", "dienst", *CHANNELS],
 )
 
-# Oude Nederlandse standaardnamen in bestaande data worden bij het laden omgezet naar het Engels.
-_RENAMES = {
-    "Normale dag": "Regular day",
-    "Rustig / geen voetbal": "Quiet / no football",
-    "Eredivisie speeldag": "Eredivisie matchday",
-    "Klassieker / topduel": "Big match / derby",
-    "Interland": "International break",
-    "Ochtend": "Morning",
-    "Middag": "Afternoon",
-    "Avond": "Evening",
-}
-
-
-def _english(series: pd.Series) -> pd.Series:
-    return series.replace(_RENAMES)
-
-
 EMPTY = {
-    "kalender": ["datum", "dagtype", "notitie"],
+    "days": ["datum", "handmatig", "notitie"],
     "afwezigheid": ["naam", "van", "tot", "reden"],
-    "rooster": ["datum", "dienst", "naam"],
+    "schedule": ["datum", "dienst", "kanaal", "naam"],
     "events": ["titel", "datum"],
 }
 
@@ -111,16 +104,34 @@ def _bools(series: pd.Series) -> pd.Series:
 
 # --- opschonen (ook gebruikt op output van st.data_editor) ---------------------------
 
+def channel_list(value) -> list[str]:
+    """'main, app' (of een lijst uit de multiselect) -> ['main', 'app']"""
+    parts = value if isinstance(value, (list, tuple)) else str(value or "").replace(";", ",").split(",")
+    chosen = {str(p).strip().lower() for p in parts}
+    return [c for c in CHANNELS if c in chosen]
+
+
 def clean_team(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    for col in TEAM_COLUMNS:
+        if col not in df:
+            # Nieuwe kolom in een bestaand bestand: de standaardwaarde per naam, anders een algemene.
+            fallback = True if col == "auto" else DEFAULT_TEAM[col].iloc[0] if col in ("seniority", "contracturen", "max_per_week", "actief") else ""
+            df[col] = df["naam"].map(dict(zip(DEFAULT_TEAM["naam"], DEFAULT_TEAM[col]))).fillna(fallback) if "naam" in df else fallback
     df["naam"] = _text(df["naam"])
     df["seniority"] = _text(df["seniority"]).replace("", "Medior")
+    df["kanalen"] = df["kanalen"].map(lambda v: ", ".join(channel_list(v)))
+    df["contracturen"] = _ints(df["contracturen"], 0)
     df["max_per_week"] = _ints(df["max_per_week"], 5)
     df["vrije_dagen"] = _text(df["vrije_dagen"])
+    df["vaste_dienst"] = _text(df["vaste_dienst"])
+    df["vaste_dagen"] = _text(df["vaste_dagen"])
+    df["ucl"] = _bools(df["ucl"])
+    df["auto"] = _bools(df["auto"].fillna(True))
     df["actief"] = _bools(df["actief"].fillna(True))
     df["notitie"] = _text(df["notitie"])
     df = df[df["naam"] != ""].drop_duplicates("naam")
-    return df.reset_index(drop=True)
+    return df[TEAM_COLUMNS].reset_index(drop=True)
 
 
 def clean_shifts(df: pd.DataFrame) -> pd.DataFrame:
@@ -128,25 +139,26 @@ def clean_shifts(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:
         df[col] = _text(df[col])
     valid = df["start"].str.fullmatch(r"\d{1,2}:\d{2}") & df["eind"].str.fullmatch(r"\d{1,2}:\d{2}")
-    df["dienst"] = _english(df["dienst"])
+    df["dienst"] = (df["dienst"])
     df = df[(df["dienst"] != "") & valid].drop_duplicates("dienst")
     return df.reset_index(drop=True)
 
 
 def clean_rules(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["dagtype"] = _english(_text(df["dagtype"]))
-    df["dienst"] = _english(_text(df["dienst"]))
-    df["aantal"] = _ints(df["aantal"])
-    df["min_senior"] = _ints(df["min_senior"])
+    df["dagtype"] = _text(df["dagtype"])
+    df["dienst"] = _text(df["dienst"])
+    for channel in CHANNELS:
+        df[channel] = _ints(df[channel])
     df = df[(df["dagtype"] != "") & (df["dienst"] != "")].drop_duplicates(["dagtype", "dienst"], keep="last")
     return df.reset_index(drop=True)
 
 
-def clean_calendar(df: pd.DataFrame) -> pd.DataFrame:
+def clean_days(df: pd.DataFrame) -> pd.DataFrame:
+    """Per datum een handmatig gekozen dagtype (leeg = automatisch) en een notitie."""
     df = df.copy()
     df["datum"] = _dates(df["datum"])
-    df["dagtype"] = _english(_text(df["dagtype"]))
+    df["handmatig"] = _text(df["handmatig"])
     df["notitie"] = _text(df["notitie"])
     return df.dropna(subset=["datum"]).drop_duplicates("datum", keep="last").reset_index(drop=True)
 
@@ -169,32 +181,52 @@ def clean_events(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values("datum").reset_index(drop=True)
 
 
+def clean_other_team(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["naam"] = _text(df["naam"])
+    df["maand"] = _text(df["maand"])
+    df["team"] = _text(df["team"]).replace("", "WomenFC")
+    df = df[(df["naam"] != "") & df["maand"].str.fullmatch(r"\d{4}-\d{2}")]
+    return df.drop_duplicates(["naam", "maand"], keep="last").sort_values(["maand", "naam"]).reset_index(drop=True)
+
+
+def other_team_as_absences(df: pd.DataFrame) -> pd.DataFrame:
+    """Een maand bij een ander team telt voor de planning als afwezig, de hele maand."""
+    first = pd.to_datetime(df["maand"] + "-01")
+    return pd.DataFrame({
+        "naam": df["naam"], "van": first.dt.date, "tot": (first + pd.offsets.MonthEnd(0)).dt.date, "reden": df["team"],
+    }, columns=EMPTY["afwezigheid"])
+
+
 def clean_roster(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["datum"] = _dates(df["datum"])
-    df["dienst"] = _english(_text(df["dienst"]))
+    df["dienst"] = _text(df["dienst"])
+    df["kanaal"] = _text(df["kanaal"]).str.lower()
     df["naam"] = _text(df["naam"])
     df = df.dropna(subset=["datum"])
-    df = df[(df["dienst"] != "") & (df["naam"] != "")]
-    return df.sort_values(["datum", "dienst", "naam"]).reset_index(drop=True)
+    df = df[(df["dienst"] != "") & (df["naam"] != "") & df["kanaal"].isin(CHANNELS)]
+    return df[EMPTY["schedule"]].sort_values(["datum", "dienst", "kanaal", "naam"]).reset_index(drop=True)
 
 
 # --- laden / opslaan -----------------------------------------------------------------
 
 def load_team():
-    return clean_team(_read("team", DEFAULT_TEAM))
+    return clean_team(_read("employees", DEFAULT_TEAM))
 
 
 def load_shifts():
-    return clean_shifts(_read("diensten", DEFAULT_SHIFTS))
+    shifts = clean_shifts(_read("shifts", DEFAULT_SHIFTS))
+    missing = DEFAULT_SHIFTS[~DEFAULT_SHIFTS["dienst"].isin(shifts["dienst"])]  # nieuwe standaarddiensten (Night)
+    return pd.concat([shifts, missing], ignore_index=True)
 
 
 def load_rules():
-    return clean_rules(_read("regels", DEFAULT_RULES))
+    return clean_rules(_read("staffing", DEFAULT_RULES))
 
 
-def load_calendar():
-    return clean_calendar(_read("kalender", pd.DataFrame(columns=EMPTY["kalender"])))
+def load_days():
+    return clean_days(_read("days", pd.DataFrame(columns=EMPTY["days"])))
 
 
 def load_absences():
@@ -205,8 +237,12 @@ def load_events():
     return clean_events(_read("events", pd.DataFrame(columns=EMPTY["events"])))
 
 
+def load_other_team():
+    return clean_other_team(_read("other_team", DEFAULT_OTHER_TEAM))
+
+
 def load_roster():
-    return clean_roster(_read("rooster", pd.DataFrame(columns=EMPTY["rooster"])))
+    return clean_roster(_read("schedule", pd.DataFrame(columns=EMPTY["schedule"])))
 
 
 def save(name: str, df: pd.DataFrame) -> None:
@@ -218,8 +254,6 @@ def load_settings() -> dict:
     settings = dict(DEFAULT_SETTINGS)
     if path.exists():
         settings.update(json.loads(path.read_text(encoding="utf-8")))
-    for key in ("standaard_doordeweeks", "standaard_weekend"):
-        settings[key] = _RENAMES.get(settings[key], settings[key])
     return settings
 
 
