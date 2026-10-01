@@ -35,6 +35,40 @@ def sample_names(limit: int = 8) -> list[str]:
     return names
 
 
+LEAGUE_PREFIX = "logos/league/"
+
+
+def league_blob(asset: str) -> str | None:
+    """Blob-pad voor een LeagueLogoAsset: een pad ('logos/league/12.png') of alleen een id ('12')."""
+    asset = str(asset or "").strip()
+    if not asset or asset.lower() in {"none", "nan"}:
+        return None
+    asset = asset.lstrip("/").removeprefix(f"{CONTAINER}/")
+    return asset if "/" in asset or "." in asset else f"{LEAGUE_PREFIX}{asset}.png"
+
+
+def league_logo_urls(assets: Iterable[str]) -> dict[str, str]:
+    """{LeagueLogoAsset: link}: volledige links blijven zoals ze zijn, de rest via Blob Storage."""
+    from azure.storage.blob import BlobSasPermissions, generate_blob_sas
+
+    assets = sorted({str(a).strip() for a in assets if league_blob(a)})
+    urls = {a: a for a in assets if a.lower().startswith("http")}
+    blobs = {a: league_blob(a) for a in assets if a not in urls}
+    if not blobs:
+        return urls
+
+    container, name, key = _container()
+    expiry = datetime.now(timezone.utc) + timedelta(hours=LINK_HOURS)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        exists = dict(zip(blobs, pool.map(lambda b: container.get_blob_client(b).exists(), blobs.values())))
+    for asset, blob in blobs.items():
+        if exists[asset]:
+            sas = generate_blob_sas(name, CONTAINER, blob, account_key=key,
+                                    permission=BlobSasPermissions(read=True), expiry=expiry)
+            urls[asset] = f"{container.url}/{blob}?{sas}"
+    return urls
+
+
 def logo_urls(ids: Iterable[int]) -> dict[int, str]:
     """{id: leeslink} voor de id's waarvan een logo bestaat."""
     from azure.storage.blob import BlobSasPermissions, generate_blob_sas
