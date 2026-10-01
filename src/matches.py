@@ -94,6 +94,15 @@ def game_popularity(g, clubs: list[str]) -> int:
     return min((r for r in ranks if r is not None), default=len(clubs))
 
 
+def big_matches(df: pd.DataFrame, clubs: list[str], top: int) -> list:
+    """Wedstrijden tussen twee clubs uit de top `top` van de clublijst (bijv. El Clásico)."""
+    def in_top(team: str) -> bool:
+        rank = popularity(team, clubs)
+        return rank is not None and rank < top
+
+    return [g for g in df.itertuples() if in_top(g.HomeTeam) and in_top(g.AwayTeam)]
+
+
 def for_teams(df: pd.DataFrame, teams: list[str]) -> pd.DataFrame:
     """Alleen de wedstrijden van de gekozen teams; thuis_uit vanuit het gekozen team."""
     df = df[df["HomeTeam"].isin(teams) | df["AwayTeam"].isin(teams)].copy()
