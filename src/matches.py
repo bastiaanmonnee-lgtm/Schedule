@@ -7,13 +7,15 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+from clubs import CLUBS
+
 LOCAL_TZ = "Europe/Amsterdam"
 
-DEFAULT_CLUBS = ["Barcelona", "Real Madrid", "Juventus", "Manchester City", "FC Utrecht"]
+DEFAULT_CLUBS = CLUBS
 
 QUERY = """
 SELECT Id, StartDateTimeUtc, TournamentStageName,
-       HomeTeamId, HomeTeam, HomeLogoId, AwayTeamId, AwayTeam, AwayLogoId
+       HomeTeamId, HomeTeam, HomeLogoId, AwayTeamId, AwayTeam, AwayLogoId, LeagueLogoAsset
 FROM MatchDataOLAP.EventBase
 WHERE StartDateUtc BETWEEN ? AND ?
   AND ({team_filter})
@@ -60,20 +62,36 @@ def club_of(name: str, clubs: list[str]) -> str | None:
     return next((c for c in clubs if search_key(c) and search_key(c) in lowered), None)
 
 
+def is_womens_team(name: str) -> bool:
+    return "(w)" in str(name).lower()
+
+
 def team_names(df: pd.DataFrame, clubs: list[str]) -> list[str]:
+    """Teams van de gevolgde clubs, zonder vrouwenteams ('Netherlands (W)')."""
     names = pd.concat([df["HomeTeam"], df["AwayTeam"]]).dropna().unique()
-    return sorted(n for n in names if club_of(n, clubs))
+    return sorted(n for n in names if club_of(n, clubs) and not is_womens_team(n))
 
 
 def default_teams(names: list[str], clubs: list[str]) -> list[str]:
-    """Per club alleen de exacte naam (bijv. 'Utrecht' / 'FC Utrecht'), anders alles met die naam."""
-    chosen = []
-    for club in clubs:
-        key = search_key(club)
-        matching = [n for n in names if club_of(n, [club])]
-        exact = [n for n in matching if n.lower() in {key, f"fc {key}", f"{key} fc", club.strip().lower()}]
-        chosen += exact or matching
-    return sorted(set(chosen))
+    """Per club alleen de exacte naam (bijv. 'Utrecht' / 'FC Utrecht'): geen 'Inter Turku' bij 'Inter',
+    'Romania' bij 'Roma' of 'Spain U21' bij 'Spain'."""
+    return sorted({n for n in names if popularity(n, clubs) is not None})
+
+
+def is_club(name: str, club: str) -> bool:
+    key = search_key(club)
+    return str(name).lower() in {key, f"fc {key}", f"{key} fc", club.strip().lower()}
+
+
+def popularity(name: str, clubs: list[str]) -> int | None:
+    """Plek van dit team in de clublijst (0 = populairst), None als het er niet in staat."""
+    return next((i for i, club in enumerate(clubs) if is_club(name, club)), None)
+
+
+def game_popularity(g, clubs: list[str]) -> int:
+    """Een wedstrijd telt zo populair als het populairste team dat erin speelt."""
+    ranks = [popularity(team, clubs) for team in (g.HomeTeam, g.AwayTeam)]
+    return min((r for r in ranks if r is not None), default=len(clubs))
 
 
 def for_teams(df: pd.DataFrame, teams: list[str]) -> pd.DataFrame:
