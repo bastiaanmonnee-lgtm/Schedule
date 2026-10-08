@@ -24,6 +24,7 @@ CLUBS = [
     "Portugal",
     "France",
     "Al Nassr FC",
+    "Indonesia",
     "Morocco",
     "Inter Miami CF",
     "Chelsea",
@@ -58,4 +59,10 @@ CLUBS = [
     "Benfica",
     "Belgium",
     "Santos",
+]
+
+# Nederlandse clubs (voor extra NL-bezetting, bijv. op een Champions League-avond met een Nederlandse club).
+DUTCH_CLUBS = [
+    "Ajax", "PSV", "Feyenoord", "AZ Alkmaar", "FC Twente", "FC Utrecht", "NEC Nijmegen",
+    "FC Groningen", "Go Ahead Eagles", "ADO Den Haag",
 ]
