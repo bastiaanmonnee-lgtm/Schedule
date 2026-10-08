@@ -92,10 +92,18 @@ def preferred_shift(name: str, day: date, person_rules: pd.DataFrame | None) -> 
     return specific or general
 
 
-def zero_hour_days(name: str, person_rules: pd.DataFrame | None) -> dict[date, str] | None:
+def _rows(person_rules) -> list:
+    """Persoonsregels als lijst rijen. Een lijst wordt niet opnieuw omgezet: zo hoeft check_conflicts de tabel maar
+    één keer door te lopen i.p.v. bij elke dienst opnieuw (itertuples is traag)."""
+    if person_rules is None:
+        return []
+    return person_rules if isinstance(person_rules, list) else list(person_rules.itertuples())
+
+
+def zero_hour_days(name: str, person_rules) -> dict[date, str] | None:
     """Nuluren: {datum: dienst of 'Any'} waarop `name` werkt; None als die persoon geen nuluren heeft."""
     result = None
-    for r in (person_rules.itertuples() if person_rules is not None else []):
+    for r in _rows(person_rules):
         if r.naam == name and r.regel == RULE_ZERO:
             result = result or {}
             for part in str(r.waarde or "").split(";"):
@@ -267,11 +275,12 @@ def rule_breaks(name: str, day: date, dienst: str, kanaal: str, crew: list[tuple
 
     `planning`: ook "Never alone on channel" (de planner zet zo iemand alleen naast een ander). Met de hand
     mag het wel: dan telt die persoon niet als bezetting en blijft de plek open (zie check_coverage)."""
-    if person_rules is None or person_rules.empty:
+    rows = _rows(person_rules)
+    if not rows:
         return []
     others = [(n, k) for n, k in crew if n != name]
     problems = []
-    for r in person_rules.itertuples():
+    for r in rows:
         if r.regel == RULE_NOT_WITH and name in (r.naam, r.waarde):
             partner = r.waarde if name == r.naam else r.naam
             if any(n == partner for n, _ in others):
@@ -731,7 +740,8 @@ def check_conflicts(
     def add(row, message):
         issues.append({"datum": row["datum"], "naam": row["naam"], "dienst": row["dienst"], "probleem": message})
 
-    if person_rules is not None and not person_rules.empty:
+    person_rules = _rows(person_rules)  # één keer omzetten, daarna overal de lijst gebruiken
+    if person_rules:
         for (day, dienst), group in assignments.groupby(["datum", "dienst"]):
             crew = list(zip(group["naam"], group["kanaal"]))
             for _, row in group.iterrows():
@@ -787,7 +797,7 @@ def check_conflicts(
 
     def may_work(name: str, weekday: int, dienst: str | None) -> bool:
         """Laten de persoonsregels deze weekdag (en dienst) toe? Dan geldt het minimum per week."""
-        for r in (person_rules.itertuples() if person_rules is not None else []):
+        for r in person_rules:
             if r.naam != name:
                 continue
             if r.regel == RULE_ONLY_DAYS and weekday not in parse_free_days(r.waarde):
@@ -805,14 +815,14 @@ def check_conflicts(
                 return False  # liever een andere dienst (bijv. Karel overdag): geen minimum voor deze dienst
         return True
 
-    for name in {r.naam for r in (person_rules.itertuples() if person_rules is not None else []) if r.regel == RULE_ZERO}:
+    for name in {r.naam for r in person_rules if r.regel == RULE_ZERO}:
         for d, shift in (zero_hour_days(name, person_rules) or {}).items():
             if d in (period or []) and not _is_absent(name, d, absence_map) \
                     and not ((assignments["naam"] == name) & (assignments["datum"] == d)).any():
                 issues.append({"datum": d, "naam": name, "dienst": shift,
                                "probleem": "Zero hours: agreed to work, but not scheduled"})
 
-    for r in (person_rules.itertuples() if person_rules is not None else []):
+    for r in person_rules:
         if r.regel != RULE_ALWAYS or r.naam not in info or not info[r.naam].actief:
             continue
         shift, _, days = str(r.waarde).partition(":")
