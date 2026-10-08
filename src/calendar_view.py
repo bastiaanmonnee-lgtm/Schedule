@@ -58,6 +58,9 @@ CSS = """
 
 .mc-week { margin-bottom:26px; }
 .mc-week-label { display:flex; align-items:baseline; gap:12px; margin-bottom:10px; }
+.mc-sb { margin-left:8px; padding:1px 7px; border:1px solid #fff; border-radius:5px; background:#fff; color:#000;
+         font-size:.58rem; font-weight:700; cursor:pointer; align-self:center; }
+.mc-sb:hover { background:var(--y); border-color:var(--y); }
 .mc-week-label .mc-display { font-size:1.05rem; }
 .mc-week-label span.range { color:var(--y); font-family:var(--display); font-weight:600; font-size:.8rem; }
 .mc-grid { display:grid; grid-template-columns:repeat(7, minmax(0,1fr)); column-gap:8px; row-gap:0; }
@@ -392,7 +395,9 @@ def render(games: pd.DataFrame, period: list[date], day_types: dict[date, str],
     if games.empty and roster is None and not any(d in (events or {}) for d in period):
         return CSS + f'<div class="mc"><div class="mc-empty">No matches in this period.</div></div>'
 
-    by_day = {d: list(g.itertuples()) for d, g in games.groupby("datum")}
+    by_day = {}  # één keer door de wedstrijden i.p.v. per dag (sneller), zelfde volgorde
+    for g in games.itertuples():
+        by_day.setdefault(g.datum, []).append(g)
     # Per dag de Europese competitie: eerst uit de wedstrijden (hoogste voorrang), anders het dagtype.
     euro_days = {d: competition_of(t) for d, t in day_types.items() if competition_of(t)}
     for d, day_games in by_day.items():
@@ -408,7 +413,10 @@ def render(games: pd.DataFrame, period: list[date], day_types: dict[date, str],
         week_end = week_start + timedelta(days=6)
         parts.append(
             f'<div class="mc-week"><div class="mc-week-label"><span class="mc-display">Week {week_start.isocalendar()[1]}</span>'
-            f'<span class="range">{week_start.day} {MONTHS[week_start.month - 1]} – {week_end.day} {MONTHS[week_end.month - 1]}</span></div>'
+            f'<span class="range">{week_start.day} {MONTHS[week_start.month - 1]} – {week_end.day} {MONTHS[week_end.month - 1]}</span>'
+            + (f'<span class="mc-sb" data-sb-week="{week_start.isoformat()}" title="Send this week to Shiftbase">Send to Shiftbase</span>'
+               if roster is not None else "")
+            + '</div>'
             f'<div class="mc-grid{" with-hours" if contracts else ""}">'
         )
         for offset in range(7):
