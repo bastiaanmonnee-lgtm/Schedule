@@ -4,3 +4,5 @@ __pycache__/
 data/
 test_logos/
 .env
+# Logins (gebruikers + wachtwoord-hashes)
+auth/
