@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from datetime import date, timedelta
+from functools import lru_cache
 
 import pandas as pd
 
@@ -72,10 +73,15 @@ def drop_double_bookings(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[sorted(keep)]
 
 
+@lru_cache(maxsize=8)
+def _keys(clubs: tuple[str, ...]) -> list[tuple[str, str]]:
+    return [(c, search_key(c)) for c in clubs if search_key(c)]
+
+
 def club_of(name: str, clubs: list[str]) -> str | None:
     """Bij welke gevolgde club hoort deze teamnaam?"""
     lowered = str(name).lower()
-    return next((c for c in clubs if search_key(c) and search_key(c) in lowered), None)
+    return next((c for c, key in _keys(tuple(clubs)) if key in lowered), None)
 
 
 def is_womens_team(name: str) -> bool:
@@ -99,9 +105,20 @@ def is_club(name: str, club: str) -> bool:
     return str(name).lower() in {key, f"fc {key}", f"{key} fc", club.strip().lower()}
 
 
+@lru_cache(maxsize=8)
+def _ranks(clubs: tuple[str, ...]) -> dict[str, int]:
+    """Alle schrijfwijzen (zoals in is_club) -> plek in de clublijst; de eerste club wint."""
+    ranks: dict[str, int] = {}
+    for i, club in enumerate(clubs):
+        key = search_key(club)
+        for variant in (key, f"fc {key}", f"{key} fc", club.strip().lower()):
+            ranks.setdefault(variant, i)
+    return ranks
+
+
 def popularity(name: str, clubs: list[str]) -> int | None:
     """Plek van dit team in de clublijst (0 = populairst), None als het er niet in staat."""
-    return next((i for i, club in enumerate(clubs) if is_club(name, club)), None)
+    return _ranks(tuple(clubs)).get(str(name).lower())
 
 
 def game_popularity(g, clubs: list[str]) -> int:
