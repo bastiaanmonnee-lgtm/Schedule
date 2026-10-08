@@ -25,6 +25,8 @@ st.markdown(
     """<style>
     [data-baseweb="tag"], [data-baseweb="tag"] * { color: #000 !important; }
     [data-baseweb="tag"] svg { fill: #000 !important; }
+    /* Gele knoppen: zwarte tekst (wit op neon-geel is onleesbaar) */
+    [data-testid^="stBaseButton-primary"], [data-testid^="stBaseButton-primary"] * { color: #000 !important; }
     /* Meldingen (bijv. "Not possible: ...") in het midden van het scherm i.p.v. rechtsonder */
     [data-testid="stToastContainer"] { top: 50% !important; bottom: auto !important; left: 50% !important;
                                        right: auto !important; transform: translate(-50%, -50%); align-items: center; }
@@ -108,30 +110,37 @@ DATE = st.column_config.DateColumn("Date", format="DD-MM-YYYY")
 CHANNEL_OPTIONS = [sch.CHANNEL_LABELS[c] for c in sch.CHANNELS]
 
 
-# --- periode: 12 weken vanaf deze week -------------------------------------------------
-# Het rooster maak je per maand zelf met een knop (alleen de dagen van die maand die in beeld zijn).
+# --- periode -------------------------------------------------------------------------
+# Je kiest weken tot 30 weken vooruit (ook over de jaarwisseling). De kalender toont vanaf de gekozen
+# begin-week minstens 12 weken (of meer als je verder plant). Het rooster maak je zelf met de knop.
 
+WEEKS_AHEAD = 30
 WEEKS_SHOWN = 12
 today = date.today()
-start = monday(today) + timedelta(days=7)  # vanaf volgende week (de lopende week staat er al)
-period = [start + timedelta(days=i) for i in range(WEEKS_SHOWN * 7)]
-end = period[-1]
-weeks = WEEKS_SHOWN
-period_key = (start, weeks)
+first_monday = monday(today) + timedelta(days=7)  # vanaf volgende week (de lopende week staat er al)
+week_starts = [first_monday + timedelta(weeks=i) for i in range(WEEKS_AHEAD)]
+week_name = lambda d: f"Week {d.isocalendar()[1]} - {d.isocalendar()[0]} ({d.day} {d:%b})"  # noqa: E731
 
-# Rooster maken: een reeks hele weken (van week … t/m week …, standaard 5 weken vanaf deze week; vanaf vandaag; de dagen van deze week die al voorbij zijn
-# blijven staan en tellen mee voor uren en rusttijd). Zo valt een week nooit half buiten het rooster.
+# Rooster maken: een reeks hele weken (van week … t/m week …, standaard 5 weken); dagen die al voorbij zijn
+# blijven staan en tellen mee voor uren en rusttijd. Zo valt een week nooit half buiten het rooster.
 NEXT_WEEKS = "next weeks"
-week_starts = period[::7]
-week_name = lambda d: f"Week {d.isocalendar()[1]} ({d.day} {d:%b})"  # noqa: E731
 b0, b0b, b1, mc3 = st.columns([1, 1, 2, 3], vertical_alignment="bottom")
 first_week = b0.selectbox("From week", week_starts, index=0, format_func=week_name)
 last_options = [w for w in week_starts if w >= first_week]
 last_week = b0b.selectbox("Until week (incl.)", last_options, index=min(4, len(last_options) - 1), format_func=week_name)
+
+start = first_week
+end = max(last_week + timedelta(days=6), start + timedelta(days=WEEKS_SHOWN * 7 - 1))
+period = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+weeks = len(period) // 7
+period_key = (start, weeks)
 # Vanaf vandaag: dagen die al voorbij zijn blijven staan.
 month_days = [d for d in period if first_week <= d <= last_week + timedelta(days=6) and d >= today]
 from_week, to_week = first_week.isocalendar()[1], last_week.isocalendar()[1]
-month_label = f"week {from_week}–{to_week}" if from_week != to_week else f"week {from_week}"
+if first_week.isocalendar()[0] != last_week.isocalendar()[0]:  # over de jaarwisseling: jaartal erbij
+    month_label = f"week {from_week} - {first_week.isocalendar()[0]} – week {to_week} - {last_week.isocalendar()[0]}"
+else:
+    month_label = f"week {from_week}–{to_week}" if from_week != to_week else f"week {from_week}"
 if b1.button(f"✨ Make schedule: {month_label}", key="make_weeks", type="primary", use_container_width=True,
              help="Plans every day in these weeks from today on; days that are already past stay as they are."):
     st.session_state["make_month"] = NEXT_WEEKS
@@ -192,10 +201,12 @@ with t_team:
         num_rows="dynamic",
         hide_index=True,
         width="stretch",
-        column_order=["naam", "kanalen", "contracturen", "nuluren", "auto", "geen_avond", "avond_vanaf", "avond_samen", "max_per_week", "vaste_dienst", "vaste_dagen",
+        column_order=["naam", "shiftbase_id", "kanalen", "contracturen", "nuluren", "auto", "geen_avond", "avond_vanaf", "avond_samen", "max_per_week", "vaste_dienst", "vaste_dagen",
                       "ucl", "vrije_dagen", "seniority"],
         column_config={
             "naam": st.column_config.TextColumn("Name", required=True),
+            "shiftbase_id": st.column_config.TextColumn(
+                "Shiftbase ID", help="The employee's id in Shiftbase (python src/shiftbase.py discover shows them)."),
             "kanalen": st.column_config.MultiselectColumn("Channels", options=CHANNEL_OPTIONS),
             "contracturen": st.column_config.NumberColumn(
                 "Contract hours / week", min_value=0, max_value=60, step=1, default=0,
@@ -618,16 +629,15 @@ with t_weeks:
     per_week = need.assign(week=need["datum"].map(lambda d: d.isocalendar()[1])).groupby("week")["nodig"].sum()
     per_week = per_week.reindex(sorted(calendar["week"].unique()), fill_value=0).to_frame()
     capacity = {}
+    whole_day_off = {}  # naam -> [(van, tot)] van hele vrije dagen; één keer opbouwen i.p.v. per persoon per dag
+    for u in unavailable[unavailable["deel"] == ""].itertuples():
+        whole_day_off.setdefault(u.naam, []).append((u.van, u.tot))
     for week, days in calendar.groupby("week")["datum"]:
         cap = 0
         for p in active.itertuples():
             free = sch.parse_free_days(p.vrije_dagen)
-            available = sum(
-                d.weekday() not in free
-                and not ((unavailable["naam"] == p.naam) & (unavailable["van"] <= d) & (unavailable["tot"] >= d)
-                         & (unavailable["deel"] == "")).any()
-                for d in days
-            )
+            off = whole_day_off.get(p.naam, [])
+            available = sum(d.weekday() not in free and not any(v <= d <= t for v, t in off) for d in days)
             cap += min(p.max_per_week, available)
         capacity[week] = cap
     per_week["capaciteit"] = pd.Series(capacity)
@@ -710,6 +720,10 @@ export default function({ data, parentElement, setTriggerValue }) {
   }
   root.innerHTML = data.html;
 
+  // Knop naast het weeklabel: die week naar Shiftbase (eerst een overzicht).
+  root.querySelectorAll(".mc-sb").forEach((btn) =>
+    btn.addEventListener("click", () => setTriggerValue("shiftbase", btn.dataset.sbWeek)));
+
   root.querySelectorAll(".mc-x").forEach((x) => {
     x.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -786,10 +800,20 @@ export default function({ data, parentElement, setTriggerValue }) {
       picker.focus();
   };
   root.querySelectorAll(".mc-add").forEach((plus) => plus.addEventListener("click", () => openPicker(plus, null)));
+  const holeKey = (hole) => {
+    const row = hole.closest("[data-drop-date]");
+    return `${row.dataset.dropDate}|${row.dataset.dropShift}|${hole.dataset.openChannel}`;
+  };
   root.querySelectorAll(".mc-open").forEach((hole) => hole.addEventListener("click", (e) => {
     e.stopPropagation();
-    openHolePicker(hole);
+    // Kandidaten worden pas bij een klik uitgerekend (snel): eerst vragen, na het antwoord opent de lijst vanzelf.
+    if ((data.open_candidates || {})[holeKey(hole)]) openHolePicker(hole);
+    else setTriggerValue("open_request", holeKey(hole));
   }));
+  if (data.open_key) {
+    const hole = [...root.querySelectorAll(".mc-open")].find((h) => holeKey(h) === data.open_key);
+    if (hole) openHolePicker(hole);
+  }
 
   // Op het kanaal-label (M / A / NL) klikken: kanaal van die persoon in die dienst wijzigen.
   root.querySelectorAll(".mc-chip[data-date] > i").forEach((label) => {
@@ -876,15 +900,29 @@ def manual_ok(problem: str) -> bool:
 
 def new_rule_breaks(before: pd.DataFrame, after: pd.DataFrame, include_allowed: bool = False) -> list[str]:
     """Persoonsregels die door een wijziging nieuw gebroken worden (zonder MANUAL_ALLOWED, tenzij gevraagd)."""
+    # Snel: alleen de betrokken mensen rond de gewijzigde dagen (plus wie die dagen werkt), niet het hele rooster.
+    changed = pd.concat([before, after]).drop_duplicates(keep=False)
+    if changed.empty:
+        return []
+    names, days = set(changed["naam"]), set(changed["datum"])
+    lo, hi = min(days) - timedelta(days=10), max(days) + timedelta(days=10)  # hele week + vorig/volgend weekend
+
+    def part(df):
+        return df[(df["naam"].isin(names) & (df["datum"] >= lo) & (df["datum"] <= hi)) | df["datum"].isin(days)]
+
     def breaks(df):
-        found = sch.check_conflicts(df, team, shifts, unavailable, settings["min_rust_uren"], person_rules=planning_rules)
+        found = sch.check_conflicts(part(df), team, shifts, unavailable, settings["min_rust_uren"],
+                                    person_rules=planning_rules)
         return {f"{r.probleem} ({r.datum})" for r in found.itertuples() if pd.notna(r.datum)}
     new = sorted(breaks(after) - breaks(before))
     return new if include_allowed else [p for p in new if not manual_ok(p)]
 
 
-def open_candidates(missing: dict) -> dict[str, list[str]]:
-    """Per open plek ("datum|dienst|kanaal") wie die dienst volgens alle regels echt kan doen."""
+def open_candidates(missing: dict, only: str | None = None) -> dict[str, list[str]]:
+    """Per open plek ("datum|dienst|kanaal") wie die dienst volgens alle regels echt kan doen.
+    Alleen voor de plek waarop net geklikt is (`only`): alles uitrekenen maakt elke klik traag."""
+    if not only:
+        return {}
     def adds_problem(name, day, dienst, kanaal) -> bool:
         # Snel: alleen de diensten van die persoon en van die dag bekijken (niet het hele rooster).
         part = roster[(roster["naam"] == name) | (roster["datum"] == day)]
@@ -896,10 +934,12 @@ def open_candidates(missing: dict) -> dict[str, list[str]]:
         here = roster[(roster["datum"] == day) & (roster["dienst"] == dienst)]
         crew = list(zip(here["naam"], here["kanaal"]))
         for kanaal in channels:
-            result[f"{day.isoformat()}|{dienst}|{kanaal}"] = [
+            if f"{day.isoformat()}|{dienst}|{kanaal}" != only:
+                continue
+            result[only] = [
                 n for n in active["naam"]
-                if sch.assignment_problem(n, day, dienst, kanaal, roster, team, shifts, unavailable,
-                                          settings["min_rust_uren"]) is None
+                if sch.assignment_problem(n, day, dienst, kanaal, roster[roster["naam"] == n], team, shifts,
+                                          unavailable, settings["min_rust_uren"]) is None
                 and not sch.rule_breaks(n, day, dienst, kanaal, crew, planning_rules)
                 and not adds_problem(n, day, dienst, kanaal)
             ]
@@ -909,7 +949,8 @@ def open_candidates(missing: dict) -> dict[str, list[str]]:
 def explain_hours(name: str, days: list[date]) -> str:
     """Waarom heeft `name` op de vrije dagen van deze week geen dienst? (tooltip in de urenkolom)"""
     channels = sch.channels_of(team.set_index("naam")["kanalen"].get(name, "")) or sch.CHANNELS
-    worked = set(roster.loc[roster["naam"] == name, "datum"])
+    own = roster[roster["naam"] == name]
+    worked = set(own["datum"])
     lines = []
     for d in days:
         if d in worked or d < today:
@@ -917,7 +958,7 @@ def explain_hours(name: str, days: list[date]) -> str:
         reasons = []
         for shift in (sch.DAY, sch.EVENING):
             for k in channels:
-                problem = sch.assignment_problem(name, d, shift, k, roster, team, shifts, unavailable,
+                problem = sch.assignment_problem(name, d, shift, k, own, team, shifts, unavailable,
                                                  settings["min_rust_uren"])
                 if problem is None:
                     here = roster[(roster["datum"] == d) & (roster["dienst"] == shift)]
@@ -988,6 +1029,92 @@ def apply_move(move: dict) -> tuple[str, bool]:
     return message, True
 
 
+SHIFTBASE_HIDDEN = ("Mats", "Rogier", "Tim")
+
+
+@st.dialog("Send week to Shiftbase", width="large")
+def shiftbase_week(week_start: date) -> None:
+    """Per week naar Shiftbase. Alleen NIEUWE diensten van die week worden aangemaakt; wat al in Shiftbase
+    staat wordt nooit gewijzigd of verwijderd. Undo haalt alleen weg wat deze tool zelf heeft aangemaakt."""
+    import datetime as dt
+
+    import shiftbase
+
+    days = [week_start + timedelta(days=i) for i in range(7)]
+    st.markdown(f"**Week {week_start.isocalendar()[1]} - {week_start.isocalendar()[0]}** · "
+                f"{days[0]:%d-%m} – {days[-1]:%d-%m} · team Content")
+    planned = storage.load_roster()
+    planned = planned[planned["datum"].isin(days)]
+    try:
+        sb = shiftbase.preview(planned, {n: i for n, i in zip(team["naam"], team["shiftbase_id"]) if i},
+                               {r.dienst: (r.start, r.eind) for r in shifts.itertuples()}, days[0], days[-1])
+    except Exception as exc:  # geen sleutel, geen verbinding, ...
+        st.error(f"Could not read Shiftbase: {type(exc).__name__}: {exc}")
+        return
+    # Mats, Rogier en Tim hebben eigen diensten in Shiftbase die niet bij dit rooster horen: niet tonen.
+    sb = sb[~(sb["Name"].isin(SHIFTBASE_HIDDEN) & (sb["Status"] == "only in Shiftbase"))]
+    # Al door deze tool aangemaakt (Shiftbase toont die soms nog niet bij het ophalen): nooit dubbel sturen.
+    sent = storage.load_sent()
+    # Diensten die iemand intussen zelf in Shiftbase heeft verwijderd, tellen niet meer als "verstuurd".
+    listed = shiftbase.roster_ids(days[0], days[-1])
+    gone = [] if listed is None else [i for i in sent.loc[sent["datum"].isin(days), "shiftbase_id"]
+                                      if str(i) not in listed]
+    if gone:
+        sent = sent[~sent["shiftbase_id"].isin(gone)]
+        storage.save_sent(sent)
+    done_keys = set(zip(sent["datum"], sent["naam"]))
+    already = (sb["Status"] == "new") & pd.Series(
+        [(d, n) in done_keys for d, n in zip(sb["Date"], sb["Name"])], index=sb.index, dtype=bool)
+    sb.loc[already, "Status"] = "sent by this tool"
+    counts = sb["Status"].map(lambda v: str(v).split(" (")[0]).value_counts()
+    st.markdown(" · ".join(f"**{n}** {s}" for s, n in counts.items()) or "Nothing planned in this week.")
+    st.dataframe(sb.drop(columns="_body"), hide_index=True, width="stretch", column_config={"Date": DATE})
+    st.caption("Only lines with status **new** are sent (Day → DAYS, Evening → Even, Night → NS, channel in the note). "
+               "Nothing that is already in Shiftbase is changed or deleted.")
+
+    new = sb[sb["Status"] == "new"]
+
+    def send(rows) -> None:
+        log = storage.load_sent()
+        done = 0
+        for r in rows.to_dict("records"):
+            try:
+                new_id = shiftbase.create_roster(r["_body"])
+            except Exception as exc:
+                st.error(f"Stopped at {r['Name']} {r['Date']:%d-%m} {r['Shift']}: {exc}")
+                break
+            log = pd.concat([log, pd.DataFrame([{
+                "shiftbase_id": new_id, "datum": r["Date"], "naam": r["Name"], "dienst": r["Shift"], "kanaal": r["Channel"],
+                "verstuurd": dt.datetime.now().isoformat(timespec="seconds")}])], ignore_index=True)
+            storage.save_sent(log)
+            done += 1
+        if done:
+            st.success(f"{done} shift(s) created in Shiftbase. Check them in Shiftbase; **Undo** below removes them again.")
+
+    if st.button(f"Send {len(new)} new shift(s)", type="primary", disabled=new.empty,
+                 use_container_width=True):
+        send(new)
+
+    mine = sent[sent["datum"].isin(days)]
+    if not mine.empty:
+        st.divider()
+        st.caption(f"This tool created {len(mine)} shift(s) in this week. Undo removes only those.")
+        if st.button(f"Undo: remove these {len(mine)} shift(s) from Shiftbase", use_container_width=True):
+            log = storage.load_sent()
+            removed = 0
+            for r in mine.itertuples():
+                try:
+                    shiftbase.delete_roster(r.shiftbase_id)
+                except Exception as exc:
+                    st.error(f"Stopped: {exc}")
+                    break
+                log = log[log["shiftbase_id"] != r.shiftbase_id]
+                storage.save_sent(log)
+                removed += 1
+            if removed:
+                st.success(f"{removed} shift(s) removed from Shiftbase.")
+
+
 with t_matches:
     if match_error is not None:
         st.error(f"Loading matches failed: {match_error}")
@@ -1042,9 +1169,16 @@ with t_matches:
                          for r in shifts.itertuples()},
         )
         result = match_calendar(data={"html": html, "people": list(active["naam"]), "channels": sch.CHANNEL_LABELS,
-                                      "open_candidates": open_candidates(missing)},
+                                      "open_candidates": open_candidates(missing, st.session_state.get("open_request")),
+                                      "open_key": st.session_state.pop("open_request", None)},
                                 key="match_calendar",
-                                on_move_change=lambda: None)
+                                on_move_change=lambda: None, on_shiftbase_change=lambda: None,
+                                on_open_request_change=lambda: None)
         if result.move:
             st.session_state["moved"] = apply_move(result.move)
             st.rerun()
+        if result.open_request:  # op een open plek geklikt: kandidaten voor alleen die plek uitrekenen
+            st.session_state["open_request"] = result.open_request
+            st.rerun()
+        if result.shiftbase:
+            shiftbase_week(date.fromisoformat(result.shiftbase))
