@@ -18,17 +18,17 @@ DEFAULT_SETTINGS = {
 CHANNELS = ["main", "app", "nl"]
 
 TEAM_COLUMNS = [
-    "naam", "seniority", "kanalen", "contracturen", "auto", "max_per_week", "vrije_dagen",
+    "naam", "seniority", "kanalen", "contracturen", "nuluren", "auto", "geen_avond", "avond_vanaf", "avond_samen", "max_per_week", "vrije_dagen",
     "vaste_dienst", "vaste_dagen", "ucl", "actief", "notitie",
 ]
-_EMPLOYEES = ["Aniek", "Emily*", "Karel", "Jonathan", "Luuk", "Kadir", "Francisco", "Joshua", "Thijn",
+_EMPLOYEES = ["Karel", "Jonathan", "Luuk", "Kadir", "Francisco", "Joshua", "Thijn",
               "Justin", "Maybel*", "Tim", "Rogier", "Mats", "Thomas*", "Arodi*"]
 _ONLY = {"Kadir": "app", "Francisco": "app", "Luuk": "app", "Jonathan": "main"}
 _MANUAL_ONLY = {"Rogier", "Tim"}  # niet automatisch inroosteren
 DEFAULT_TEAM = pd.DataFrame(
     [
         {
-            "naam": n.rstrip("*"), "seniority": "Intern" if n.rstrip("*") == "Maybel" else "Medior", "kanalen": _ONLY.get(n, "main, app, nl"), "auto": n not in _MANUAL_ONLY,
+            "naam": n.rstrip("*"), "seniority": "Intern" if n.rstrip("*") == "Maybel" else "Medior", "kanalen": _ONLY.get(n, "main, app, nl"), "auto": n not in _MANUAL_ONLY, "geen_avond": False, "avond_vanaf": "", "avond_samen": False, "nuluren": False,
             "contracturen": 16 if n == "Thijn" else 40, "max_per_week": 5, "vrije_dagen": "",
             # Francisco werkt altijd 16:00 - 00:00 en steevast op vrijdag; Rogier staat bij UCL op main.
             "vaste_dienst": "Evening" if n == "Francisco" else "", "vaste_dagen": "fri" if n == "Francisco" else "",
@@ -41,8 +41,29 @@ DEFAULT_TEAM = pd.DataFrame(
 
 # Per maand bij een ander team (bijv. WomenFC): die maand niet in dit rooster.
 DEFAULT_OTHER_TEAM = pd.DataFrame(
-    [("Aniek", "2026-10", "WomenFC"), ("Emily", "2026-10", "WomenFC")],
+    [],
     columns=["naam", "maand", "team"],
+)
+
+# Regels per persoon; de soorten staan in scheduler.RULE_TYPES.
+DEFAULT_PERSON_RULES = pd.DataFrame(
+    [
+        ("Karel", "Only on channel", "main"),
+        ("Karel", "Prefers shift", "Day"),
+        ("Jonathan", "Prefers shift", "Evening"),
+        ("Jonathan", "Always works", "Day: mon, fri"),
+    ],
+    columns=["naam", "regel", "waarde"],
+)
+
+# Extra bezetting bij wedstrijden en events; de aanleidingen staan in scheduler.TRIGGERS.
+DEFAULT_MATCH_STAFFING = pd.DataFrame(
+    [
+        ("Team plays", "Netherlands", 0, 0, 1),
+        ("Big match", "", 1, 1, 0),
+        ("Special event", "", 1, 1, 0),
+    ],
+    columns=["aanleiding", "waarde", "main", "app", "nl"],
 )
 
 DEFAULT_SHIFTS = pd.DataFrame(
@@ -54,8 +75,8 @@ DEFAULT_SHIFTS = pd.DataFrame(
 _RULES = {
     # dagtype: {dienst: (main, app, nl)}
     "Regular day": {"Day": (1, 1, 1), "Evening": (1, 1, 1)},
-    "Weekend": {"Day": (1, 1, 1), "Evening": (2, 2, 1)},
-    "Champions League": {"Day": (1, 1, 1), "Evening": (2, 2, 1)},  # main: 1 + Rogier
+    "Weekend": {"Day": (1, 1, 1), "Evening": (1, 1, 1)},  # zoals in het oude rooster: ±3 per weekendavond (+ extra bij topduels)
+    "Champions League": {"Day": (1, 1, 1), "Evening": (2, 2, 2)},  # vast 2 per kanaal; geen extra's erbovenop
 }
 DEFAULT_RULES = pd.DataFrame(
     [(dt, d, *counts) for dt, shifts in _RULES.items() for d, counts in shifts.items()],
@@ -64,7 +85,7 @@ DEFAULT_RULES = pd.DataFrame(
 
 EMPTY = {
     "days": ["datum", "handmatig", "notitie"],
-    "afwezigheid": ["naam", "van", "tot", "reden"],
+    "afwezigheid": ["naam", "van", "tot", "deel", "reden"],  # deel: "" = hele dag, "Day" of "Evening"
     "schedule": ["datum", "dienst", "kanaal", "naam"],
     "events": ["titel", "datum"],
 }
@@ -116,7 +137,7 @@ def clean_team(df: pd.DataFrame) -> pd.DataFrame:
     for col in TEAM_COLUMNS:
         if col not in df:
             # Nieuwe kolom in een bestaand bestand: de standaardwaarde per naam, anders een algemene.
-            fallback = True if col == "auto" else DEFAULT_TEAM[col].iloc[0] if col in ("seniority", "contracturen", "max_per_week", "actief") else ""
+            fallback = True if col == "auto" else False if col in ("geen_avond", "nuluren", "avond_samen") else DEFAULT_TEAM[col].iloc[0] if col in ("seniority", "contracturen", "max_per_week", "actief") else ""
             df[col] = df["naam"].map(dict(zip(DEFAULT_TEAM["naam"], DEFAULT_TEAM[col]))).fillna(fallback) if "naam" in df else fallback
     df["naam"] = _text(df["naam"])
     df["seniority"] = _text(df["seniority"]).replace("", "Medior")
@@ -127,8 +148,12 @@ def clean_team(df: pd.DataFrame) -> pd.DataFrame:
     df["vaste_dienst"] = _text(df["vaste_dienst"])
     df["vaste_dagen"] = _text(df["vaste_dagen"])
     df["ucl"] = _bools(df["ucl"])
-    df["auto"] = _bools(df["auto"].fillna(True))
-    df["actief"] = _bools(df["actief"].fillna(True))
+    df["auto"] = _bools(df["auto"].fillna(True).replace("", True))  # lege cel = aan
+    df["geen_avond"] = _bools(df["geen_avond"].fillna(False))
+    df["nuluren"] = _bools(df["nuluren"].fillna(False))
+    df["avond_samen"] = _bools(df["avond_samen"].fillna(False))
+    df["avond_vanaf"] = _dates(df["avond_vanaf"]).map(lambda d: d.isoformat() if pd.notna(d) else "")
+    df["actief"] = _bools(df["actief"].fillna(True).replace("", True))  # lege cel = aan
     df["notitie"] = _text(df["notitie"])
     df = df[df["naam"] != ""].drop_duplicates("naam")
     return df[TEAM_COLUMNS].reset_index(drop=True)
@@ -169,8 +194,10 @@ def clean_absences(df: pd.DataFrame) -> pd.DataFrame:
     df["van"] = _dates(df["van"])
     df["tot"] = _dates(df["tot"])
     df["tot"] = df["tot"].where(df["tot"].notna(), df["van"])
-    df["reden"] = _text(df["reden"])
-    return df[(df["naam"] != "")].dropna(subset=["van"]).reset_index(drop=True)
+    df["deel"] = _text(df["deel"]) if "deel" in df else ""
+    df["deel"] = df["deel"].replace({"Whole day": "", "All day": "", "Day off": "Day", "Evening off": "Evening"})
+    df["reden"] = _text(df["reden"]) if "reden" in df else ""
+    return df[(df["naam"] != "")].dropna(subset=["van"])[EMPTY["afwezigheid"]].reset_index(drop=True)
 
 
 def clean_events(df: pd.DataFrame) -> pd.DataFrame:
@@ -194,8 +221,39 @@ def other_team_as_absences(df: pd.DataFrame) -> pd.DataFrame:
     """Een maand bij een ander team telt voor de planning als afwezig, de hele maand."""
     first = pd.to_datetime(df["maand"] + "-01")
     return pd.DataFrame({
-        "naam": df["naam"], "van": first.dt.date, "tot": (first + pd.offsets.MonthEnd(0)).dt.date, "reden": df["team"],
+        "naam": df["naam"], "van": first.dt.date, "tot": (first + pd.offsets.MonthEnd(0)).dt.date, "deel": "",
+        "reden": df["team"],
     }, columns=EMPTY["afwezigheid"])
+
+
+def clean_person_rules(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for col in ("naam", "regel", "waarde"):
+        df[col] = _text(df[col])
+    # Kanalen in kleine letters ('NL' -> 'nl'), zoals in het rooster.
+    channel = df["regel"].isin(["Never alone on channel", "Only on channel"])
+    df.loc[channel, "waarde"] = df.loc[channel, "waarde"].str.lower()
+    df = df[(df["naam"] != "") & (df["regel"] != "") & (df["waarde"] != "")]
+    return df.drop_duplicates().reset_index(drop=True)
+
+
+def clean_match_staffing(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["aanleiding"] = _text(df["aanleiding"])
+    df["waarde"] = _text(df["waarde"])
+    for channel in CHANNELS:
+        df[channel] = _ints(df[channel])
+    return df[df["aanleiding"] != ""].reset_index(drop=True)
+
+
+def clean_zero_hours(df: pd.DataFrame) -> pd.DataFrame:
+    """Nuluren: per persoon de dagen (en eventueel dienst) waarop hij werkt."""
+    df = df.copy()
+    df["naam"] = _text(df["naam"])
+    df["datum"] = _dates(df["datum"])
+    df["dienst"] = _text(df["dienst"]).replace("", "Any")
+    df = df[df["naam"] != ""].dropna(subset=["datum"]).drop_duplicates(["naam", "datum"], keep="last")
+    return df.sort_values(["datum", "naam"]).reset_index(drop=True)
 
 
 def clean_roster(df: pd.DataFrame) -> pd.DataFrame:
@@ -239,6 +297,18 @@ def load_events():
 
 def load_other_team():
     return clean_other_team(_read("other_team", DEFAULT_OTHER_TEAM))
+
+
+def load_person_rules():
+    return clean_person_rules(_read("person_rules", DEFAULT_PERSON_RULES))
+
+
+def load_match_staffing():
+    return clean_match_staffing(_read("match_staffing", DEFAULT_MATCH_STAFFING))
+
+
+def load_zero_hours():
+    return clean_zero_hours(_read("zero_hours", pd.DataFrame(columns=["naam", "datum", "dienst"])))
 
 
 def load_roster():
