@@ -17,6 +17,9 @@ SECRET_NAMES = {
     # Azure Blob Storage (logo's)
     "ABS_STORAGE_ACCOUNT_NAME_APP_PROD": "AppProdAzureBlobStorageAccountName",
     "ABS_STORAGE_ACCOUNT_KEY_APP_PROD": "AppProdAzureBlobStorageAccountKey",
+    # Datascience Blob Storage: daar staan de logins van de expense-claim-generator (gedeeld).
+    "ABS_STORAGE_ACCOUNT_NAME_DS": "DatascienceAzureBlobStorageAccountName",
+    "ABS_STORAGE_ACCOUNT_KEY_DS": "DatascienceAzureBlobStorageAccountKey",
     # SQL-gebruiker voor de wedstrijden (MatchDataOLAP.EventBase).
     # Let op: 'AppProdAzureSql*' werkt NIET op deze server (login failed voor 'Analytics').
     "MATCH_DB_USERNAME": None,

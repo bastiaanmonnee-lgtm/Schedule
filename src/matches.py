@@ -53,7 +53,23 @@ def prepare(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
     df["aftrap"] = pd.to_datetime(df["StartDateTimeUtc"], utc=True).dt.tz_convert(LOCAL_TZ)
     df["datum"] = df["aftrap"].dt.date
     df["tijd"] = df["aftrap"].dt.strftime("%H:%M")
-    return df[(df["datum"] >= start) & (df["datum"] <= end)].reset_index(drop=True)
+    df = df[(df["datum"] >= start) & (df["datum"] <= end)]
+    return drop_double_bookings(df).reset_index(drop=True)
+
+
+def drop_double_bookings(df: pd.DataFrame) -> pd.DataFrame:
+    """Een team kan niet tegelijk twee wedstrijden spelen. Staat hetzelfde team op hetzelfde moment twee keer
+    in de database (bijv. Marokko–Ghana én Marokko–Mali om 20:00, omdat de tegenstander is gewijzigd),
+    dan blijft alleen de nieuwste over (hoogste Id)."""
+    if df.empty or "Id" not in df:
+        return df
+    seen, keep = set(), []
+    for row in df.sort_values("Id", ascending=False).itertuples():
+        moments = {(row.aftrap, row.HomeTeamId), (row.aftrap, row.AwayTeamId)}
+        if not moments & seen:
+            keep.append(row.Index)
+        seen |= moments
+    return df.loc[sorted(keep)]
 
 
 def club_of(name: str, clubs: list[str]) -> str | None:

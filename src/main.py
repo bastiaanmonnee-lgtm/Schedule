@@ -5,17 +5,18 @@ Start met:  streamlit run src/main.py   (of: docker compose up)
 
 from __future__ import annotations
 
-import io
 from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
 
+import auth
 import calendar_view
 import logos
 import matches
 import scheduler as sch
 import storage
+from clubs import DUTCH_CLUBS
 
 st.set_page_config(page_title="Schedule · 433", page_icon="⚽", layout="wide", initial_sidebar_state="collapsed")
 
@@ -24,9 +25,42 @@ st.markdown(
     """<style>
     [data-baseweb="tag"], [data-baseweb="tag"] * { color: #000 !important; }
     [data-baseweb="tag"] svg { fill: #000 !important; }
+    /* Meldingen (bijv. "Not possible: ...") in het midden van het scherm i.p.v. rechtsonder */
+    [data-testid="stToastContainer"] { top: 50% !important; bottom: auto !important; left: 50% !important;
+                                       right: auto !important; transform: translate(-50%, -50%); align-items: center; }
+    [data-testid="stToast"] { min-width: 460px; padding: 22px 26px !important; font-size: 1.15rem; }
+    [data-testid="stToast"] p { font-size: 1.15rem !important; font-weight: 600; line-height: 1.4; }
+    [data-testid="stToast"] [data-testid="stToastDynamicIcon"], [data-testid="stToast"] span[role="img"] { font-size: 1.6rem; }
     </style>""",
     unsafe_allow_html=True,
 )
+
+# --- Inloggen ------------------------------------------------------------------------
+# Zelfde opzet als de expense-claim-generator (streamlit-authenticator, zie auth.py).
+
+authenticator, user = auth.require_login()
+with st.sidebar:
+    st.caption(f"Logged in as **{user.name}** ({user.role})")
+    authenticator.logout(location="sidebar")
+
+if not user.is_admin:
+    # Medewerkers: alleen hun eigen diensten (de indienpagina voor wensen komt hier later bij).
+    st.title(f"Hi {user.employee} 👋")
+    mine = storage.load_roster()
+    mine = mine[(mine["naam"] == user.employee) & (mine["datum"] >= date.today())]
+    if mine.empty:
+        st.info("You have no upcoming shifts yet.")
+    else:
+        times = {r.dienst: f"{r.start}–{r.eind}" for r in storage.load_shifts().itertuples()}
+        st.dataframe(
+            pd.DataFrame({
+                "Date": mine["datum"].map(lambda d: f"{sch.WEEKDAYS[d.weekday()]} {d:%d-%m-%Y}"),
+                "Shift": [f"{d} ({times.get(d, '')})" for d in mine["dienst"]],
+                "Channel": mine["kanaal"].map(sch.CHANNEL_LABELS),
+            }),
+            hide_index=True, width="stretch",
+        )
+    st.stop()
 
 
 # --- helpers voor bewerkbare tabellen ------------------------------------------------
@@ -73,25 +107,35 @@ def monday(d: date) -> date:
 DATE = st.column_config.DateColumn("Date", format="DD-MM-YYYY")
 CHANNEL_OPTIONS = [sch.CHANNEL_LABELS[c] for c in sch.CHANNELS]
 
-COVERAGE_LABELS = {
-    "datum": "Date", "dagtype": "Day type", "dienst": "Shift", "kanaal": "Channel", "nodig": "Needed",
-    "ingepland": "Scheduled", "status": "Status", "mensen": "People", "reden": "Extra for",
-}
-CONFLICT_LABELS = {"datum": "Date", "naam": "Name", "dienst": "Shift", "probleem": "Issue"}
 
-# --- periode (sidebar) ---------------------------------------------------------------
+# --- periode: 12 weken vanaf deze week -------------------------------------------------
+# Het rooster maak je per maand zelf met een knop (alleen de dagen van die maand die in beeld zijn).
 
-with st.sidebar:
-    st.header("⚽ Period")
-    today = date.today()
-    start = monday(st.date_input("From week of", value=monday(today) + timedelta(days=7), format="DD-MM-YYYY"))
-    weeks = st.number_input("Number of weeks", min_value=1, max_value=26, value=4, step=1)
-    period = [start + timedelta(days=i) for i in range(int(weeks) * 7)]
-    end = period[-1]
-    period_key = (start, int(weeks))
-    st.caption(f"Week {start.isocalendar()[1]} to {end.isocalendar()[1]}  \n{start:%d-%m-%Y} – {end:%d-%m-%Y}")
-    st.divider()
-    st.caption("All changes are saved automatically in the `data/` folder.")
+WEEKS_SHOWN = 12
+today = date.today()
+start = monday(today) + timedelta(days=7)  # vanaf volgende week (de lopende week staat er al)
+period = [start + timedelta(days=i) for i in range(WEEKS_SHOWN * 7)]
+end = period[-1]
+weeks = WEEKS_SHOWN
+period_key = (start, weeks)
+
+# Rooster maken: een reeks hele weken (van week … t/m week …, standaard 5 weken vanaf deze week; vanaf vandaag; de dagen van deze week die al voorbij zijn
+# blijven staan en tellen mee voor uren en rusttijd). Zo valt een week nooit half buiten het rooster.
+NEXT_WEEKS = "next weeks"
+week_starts = period[::7]
+week_name = lambda d: f"Week {d.isocalendar()[1]} ({d.day} {d:%b})"  # noqa: E731
+b0, b0b, b1, mc3 = st.columns([1, 1, 2, 3], vertical_alignment="bottom")
+first_week = b0.selectbox("From week", week_starts, index=0, format_func=week_name)
+last_options = [w for w in week_starts if w >= first_week]
+last_week = b0b.selectbox("Until week (incl.)", last_options, index=min(4, len(last_options) - 1), format_func=week_name)
+# Vanaf vandaag: dagen die al voorbij zijn blijven staan.
+month_days = [d for d in period if first_week <= d <= last_week + timedelta(days=6) and d >= today]
+from_week, to_week = first_week.isocalendar()[1], last_week.isocalendar()[1]
+month_label = f"week {from_week}–{to_week}" if from_week != to_week else f"week {from_week}"
+if b1.button(f"✨ Make schedule: {month_label}", key="make_weeks", type="primary", use_container_width=True,
+             help="Plans every day in these weeks from today on; days that are already past stay as they are."):
+    st.session_state["make_month"] = NEXT_WEEKS
+month = NEXT_WEEKS  # mc3: hier komt zo nodig de vraag of een bestaand rooster vervangen mag worden
 
 # --- wedstrijden laden (nodig voor dagtypes, extra bezetting en de kalender) ---------
 
@@ -118,15 +162,14 @@ try:
 except Exception as exc:  # database niet bereikbaar, .env niet ingevuld, ...
     match_error = exc
 
-ucl_days, big_by_day = set(), {}
+ucl_days = set()
 if games is not None:
     ucl_days = {g.datum for g in games.itertuples()
                 if (calendar_view.competition_of(g.competitie) or ("",))[0] == "ucl"}
-    for g in matches.big_matches(games, clubs, sch.TOP_CLUBS):
-        big_by_day.setdefault(g.datum, []).append((f"{g.HomeTeam} – {g.AwayTeam}", sch.shift_for_kickoff(g.tijd)))
 
-t_matches, t_events, t_team, t_weeks, t_rules, t_absence, t_roster = st.tabs(
-    ["⚽ Matches", "⭐ Special events", "👥 Employees", "📅 Weeks & staffing", "⚙️ Staffing rules", "🏖️ Time off", "🗓️ Schedule"]
+t_matches, t_events, t_team, t_zero, t_weeks, t_rules, t_absence = st.tabs(
+    ["⚽ Matches", "⭐ Special events", "👥 Employees", "⏱️ Zero hours", "📅 Weeks & staffing", "⚙️ Staffing rules",
+     "🏖️ Time off"]
 )
 
 # --- Medewerkers ---------------------------------------------------------------------
@@ -140,7 +183,8 @@ with t_team:
     )
     # clean_team: ook een sessie van vóór een nieuwe kolom (bijv. contracturen) krijgt die kolom te zien.
     team_view = storage.clean_team(base("employees", storage.load_team)).assign(
-        kanalen=lambda df: df["kanalen"].map(lambda v: [sch.CHANNEL_LABELS[c] for c in sch.channels_of(v)])
+        kanalen=lambda df: df["kanalen"].map(lambda v: [sch.CHANNEL_LABELS[c] for c in sch.channels_of(v)]),
+        avond_vanaf=lambda df: pd.to_datetime(df["avond_vanaf"], errors="coerce").dt.date,  # datumkiezer in de tabel
     )
     team = st.data_editor(
         team_view,
@@ -148,8 +192,8 @@ with t_team:
         num_rows="dynamic",
         hide_index=True,
         width="stretch",
-        column_order=["naam", "kanalen", "contracturen", "auto", "max_per_week", "vaste_dienst", "vaste_dagen",
-                      "ucl", "vrije_dagen", "seniority", "actief", "notitie"],
+        column_order=["naam", "kanalen", "contracturen", "nuluren", "auto", "geen_avond", "avond_vanaf", "avond_samen", "max_per_week", "vaste_dienst", "vaste_dagen",
+                      "ucl", "vrije_dagen", "seniority"],
         column_config={
             "naam": st.column_config.TextColumn("Name", required=True),
             "kanalen": st.column_config.MultiselectColumn("Channels", options=CHANNEL_OPTIONS),
@@ -157,17 +201,34 @@ with t_team:
                 "Contract hours / week", min_value=0, max_value=60, step=1, default=0,
                 help="Shown next to each week in the match calendar: red = fewer hours scheduled, orange = more.",
             ),
+            "nuluren": st.column_config.CheckboxColumn(
+                "Zero hours", default=False,
+                help="Only scheduled on the days you enter in the Zero hours tab (and then always); never topped up.",
+            ),
             "auto": st.column_config.CheckboxColumn(
                 "Auto schedule", default=True, help="Off: the planner skips this person; you can still add them by hand.",
+            ),
+            "geen_avond": st.column_config.CheckboxColumn(
+                "No evenings", default=False, help="Never scheduled in the evening shift (16:00–00:00).",
+            ),
+            "avond_vanaf": st.column_config.DateColumn(
+                "Evenings from", format="DD-MM-YYYY",
+                help="No evening shifts before this date (e.g. new colleagues). Empty = always allowed.",
+            ),
+            "avond_samen": st.column_config.CheckboxColumn(
+                "Evenings only together", default=False,
+                help="In the evening someone else must be on the same channel (e.g. on Main with a second person).",
             ),
             "max_per_week": st.column_config.NumberColumn("Max shifts / week", min_value=0, max_value=7, step=1, default=5),
             "vaste_dienst": st.column_config.SelectboxColumn("Always shift", options=["", sch.DAY, sch.EVENING]),
             "vaste_dagen": st.column_config.TextColumn("Always on"),
             "ucl": st.column_config.CheckboxColumn("UCL nights", default=False),
             "vrije_dagen": st.column_config.TextColumn("Fixed days off"),
-            "seniority": st.column_config.SelectboxColumn("Seniority", options=sch.SENIORITY_LEVELS, default="Medior"),
-            "actief": st.column_config.CheckboxColumn("Active", default=True),
-            "notitie": st.column_config.TextColumn("Note"),
+            "seniority": st.column_config.SelectboxColumn(
+                "Role", options=sch.SENIORITY_LEVELS, default="Medior",
+                format_func=lambda v: "Intern (stagiair)" if v == sch.INTERN else v,
+                help="Intern (stagiair): always Mon–Fri day shifts, never weekends, never alone on their channel.",
+            ),
         },
     )
     team = storage.clean_team(team)
@@ -221,12 +282,17 @@ with t_rules:
         shift_names = list(shifts["dienst"])
 
     with right:
-        st.subheader("Staffing per day type")
+        h1, h2 = st.columns([3, 1], vertical_alignment="bottom")
+        h1.subheader("Staffing per day type")
+        if h2.button("↺ Reset to recommended", use_container_width=True,
+                     help="Back to the standard staffing based on the old schedule (1 per channel per shift)."):
+            persist("staffing", storage.DEFAULT_RULES.copy())
+            reset_base("staffing", storage.DEFAULT_RULES.copy())
+            st.session_state["moved"] = ("Staffing per day type reset to the recommended values.", True)
+            st.rerun()
         st.caption(
             "People needed per channel. Day types are set automatically: *Champions League* on UCL nights, "
-            "*Weekend* on Sat/Sun, otherwise *Regular day*. Main on UCL nights counts the UCL person (Rogier). "
-            f"Big matches (two clubs from the top {sch.TOP_CLUBS} in clubs.py) and special events get "
-            "+1 on main and app in the shift of the match (events: evening)."
+            "*Weekend* on Sat/Sun, otherwise *Regular day*. Extra people for matches and events: see the table below."
         )
         rules = st.data_editor(
             base("staffing", storage.load_rules),
@@ -259,6 +325,52 @@ with t_rules:
         storage.save_settings(new_settings)
     settings = new_settings
 
+    st.subheader("Person rules")
+    st.caption(
+        "Extra rules per person; the planner, the checks and drag & drop all follow them. "
+        "Value per rule: " + " · ".join(f"**{rule}**: {how}" for rule, how in sch.RULE_VALUES.items())
+    )
+    person_rules = st.data_editor(
+        base("person_rules", storage.load_person_rules),
+        key=editor_key("person_rules"),
+        num_rows="dynamic",
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "naam": st.column_config.SelectboxColumn("Name", options=list(team["naam"]), required=True),
+            "regel": st.column_config.SelectboxColumn("Rule", options=sch.RULE_TYPES, required=True),
+            "waarde": st.column_config.TextColumn("Value", required=True, help="Channel, shift or person, depending on the rule"),
+        },
+    )
+    person_rules = storage.clean_person_rules(person_rules)
+    persist("person_rules", person_rules)
+
+    st.subheader("Extra staffing for matches & events")
+    st.caption(
+        "Extra people per channel in the shift of the kick-off (special events: evening; night matches: none). "
+        "Not on Champions League evenings: those have a fixed staffing in the table above. "
+        f"**{sch.TRIGGER_TEAM}**: value = a team, e.g. Netherlands or Ajax. "
+        f"**{sch.TRIGGER_DUTCH}**: value = a competition, e.g. Champions League; a Dutch club (clubs.py) plays. "
+        f"**{sch.TRIGGER_COMPETITION}**: value = (part of) the competition, e.g. Nations League. "
+        f"**{sch.TRIGGER_BIG}**: two clubs from the top {sch.TOP_CLUBS} of clubs.py. "
+        f"**{sch.TRIGGER_EVENT}**: every special event."
+    )
+    match_staffing = st.data_editor(
+        base("match_staffing", storage.load_match_staffing),
+        key=editor_key("match_staffing"),
+        num_rows="dynamic",
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "aanleiding": st.column_config.SelectboxColumn("When", options=sch.TRIGGERS, required=True),
+            "waarde": st.column_config.TextColumn("Value", help="Team or competition; empty for Big match / Special event"),
+            **{c: st.column_config.NumberColumn(f"+ {sch.CHANNEL_LABELS[c]}", min_value=0, max_value=10, step=1, default=0)
+               for c in sch.CHANNELS},
+        },
+    )
+    match_staffing = storage.clean_match_staffing(match_staffing)
+    persist("match_staffing", match_staffing)
+
 # --- Special events ------------------------------------------------------------------
 
 with t_events:
@@ -283,35 +395,160 @@ with t_events:
 
 with t_absence:
     st.subheader("Time off & holidays")
-    st.caption("People who are absent in this period are not scheduled.")
+    st.caption("People who are absent in this period are not scheduled. Pick a name and a date (or a range), then Add.")
+    with st.form("add_time_off", clear_on_submit=True, border=True):
+        f1, f2, f2b, f3 = st.columns([2, 3, 2, 1], vertical_alignment="bottom")
+        off_name = f1.selectbox("Name", list(team["naam"]), index=None, placeholder="Choose a person")
+        off_part = f2b.selectbox("Part", ["Whole day", "Day off", "Evening off"],
+                                 help="Day off = no day shift (an evening is fine); Evening off = no evening shift.")
+        off_days = f2.date_input("From – until", value=[], format="DD-MM-YYYY",
+                                 help="Click a start date and an end date; click one date twice for a single day.")
+        if f3.form_submit_button("➕ Add", type="primary", use_container_width=True):
+            days = list(off_days) if isinstance(off_days, (list, tuple)) else [off_days]
+            if off_name and days:
+                added = pd.DataFrame([{"naam": off_name, "van": days[0], "tot": days[-1],
+                                       "deel": off_part, "reden": ""}])
+                current = storage.clean_absences(pd.concat([base("afwezigheid", storage.load_absences), added], ignore_index=True))
+                persist("afwezigheid", current)
+                reset_base("afwezigheid", current)
+                st.rerun()
+            else:
+                st.warning("Choose a person and a date first.")
+    st.caption("Change or delete below (select a row and press Delete).")
     absences = st.data_editor(
-        base("afwezigheid", storage.load_absences),
+        base("afwezigheid", storage.load_absences).assign(  # leesbaar in de tabel; opgeslagen als "", Day, Evening
+            deel=lambda df: df["deel"].map({"": "Whole day", "Day": "Day off", "Evening": "Evening off"}).fillna("Whole day")
+        ),
         key=editor_key("afwezigheid"),
+        num_rows="dynamic",
+        hide_index=True,
+        width="stretch",
+        column_order=["naam", "van", "tot", "deel"],
+        column_config={
+            "naam": st.column_config.SelectboxColumn("Name", options=list(team["naam"]), required=True),
+            "van": st.column_config.DateColumn("From", format="DD-MM-YYYY", required=True),
+            "tot": st.column_config.DateColumn("Until (incl.)", format="DD-MM-YYYY"),
+            "deel": st.column_config.SelectboxColumn("Part", options=["Whole day", "Day off", "Evening off"],
+                                                     default="Whole day", required=True),
+        },
+    )
+    absences = storage.clean_absences(absences)
+    persist("afwezigheid", absences)
+
+# --- Nuluren ---------------------------------------------------------------------------
+
+zero_people = list(team.loc[team["nuluren"] & team["actief"], "naam"])
+with t_zero:
+    st.subheader("Zero hours")
+    st.caption(
+        "People with **Zero hours** ticked on the Employees page are only scheduled on the days below, and then always "
+        "(in the shift you choose, or wherever needed with *Any*). They are never topped up to contract hours."
+    )
+    if not zero_people:
+        st.info("Nobody has **Zero hours** ticked yet: do that on the Employees page first.")
+    with st.form("add_zero_hours", clear_on_submit=True, border=True):
+        z1, z2, z3, z4 = st.columns([2, 3, 2, 1], vertical_alignment="bottom")
+        z_name = z1.selectbox("Name", zero_people, index=None, placeholder="Choose a person")
+        z_day = z2.date_input("Day", value=None, format="DD-MM-YYYY")
+        z_shift = z3.selectbox("Shift", ["Any", sch.DAY, sch.EVENING])
+        if z4.form_submit_button("➕ Add", type="primary", use_container_width=True):
+            if z_name and z_day:
+                added = pd.DataFrame([{"naam": z_name, "datum": z_day, "dienst": z_shift}])
+                current = storage.clean_zero_hours(pd.concat([base("zero_hours", storage.load_zero_hours), added]))
+                persist("zero_hours", current)
+                reset_base("zero_hours", current)
+                st.rerun()
+            else:
+                st.warning("Choose a person and a day first.")
+    st.caption("Change a name, day or shift by clicking the cell. Tick **Delete** to remove a line.")
+    edited_zero = st.data_editor(
+        base("zero_hours", storage.load_zero_hours).assign(delete=False),
+        key=editor_key("zero_hours"),
         num_rows="dynamic",
         hide_index=True,
         width="stretch",
         column_config={
             "naam": st.column_config.SelectboxColumn("Name", options=list(team["naam"]), required=True),
-            "van": st.column_config.DateColumn("From", format="DD-MM-YYYY", required=True),
-            "tot": st.column_config.DateColumn("Until (incl.)", format="DD-MM-YYYY"),
-            "reden": st.column_config.TextColumn("Reason"),
+            "datum": st.column_config.DateColumn("Day", format="DD-MM-YYYY", required=True),
+            "dienst": st.column_config.SelectboxColumn("Shift", options=["Any", sch.DAY, sch.EVENING], default="Any"),
+            "delete": st.column_config.CheckboxColumn("Delete", default=False, help="Tick to remove this line"),
         },
     )
-    absences = storage.clean_absences(absences)
-    persist("afwezigheid", absences)
+    remove = edited_zero["delete"].fillna(False).astype(bool)
+    zero_hours = storage.clean_zero_hours(edited_zero[~remove].drop(columns="delete"))
+    before = storage.clean_zero_hours(base("zero_hours", storage.load_zero_hours))
+    persist("zero_hours", zero_hours)
+    if not zero_hours.reset_index(drop=True).equals(before.reset_index(drop=True)):
+        # Iets aangepast of weggehaald: de tabel voortaan opbouwen vanuit wat nu is opgeslagen.
+        reset_base("zero_hours", zero_hours)
+
+# Regels voor de planner: de person rules plus de nuluren-afspraken (als interne regel per persoon).
+# Avonden pas vanaf een datum / alleen samen (Employees) als regels voor de planner.
+evening_rules = pd.DataFrame(
+    [{"naam": r.naam, "regel": sch.RULE_EVENING_FROM, "waarde": r.avond_vanaf} for r in team.itertuples() if r.avond_vanaf]
+    + [{"naam": r.naam, "regel": sch.RULE_EVENING_TOGETHER, "waarde": "-"} for r in team.itertuples() if r.avond_samen],
+    columns=["naam", "regel", "waarde"],
+)
+
+# Stagiairs (Role = Intern): altijd ma t/m vr overdag, nooit alleen op hun kanaal. Zelfde regels voor elke stagiair.
+intern_rules = pd.DataFrame(
+    [{"naam": r.naam, "regel": sch.RULE_ALWAYS, "waarde": "Day: mon, tue, wed, thu, fri"}
+     for r in team.itertuples() if r.seniority == sch.INTERN]
+    + [{"naam": r.naam, "regel": sch.RULE_NOT_ALONE, "waarde": k}
+       for r in team.itertuples() if r.seniority == sch.INTERN for k in sch.channels_of(r.kanalen)],
+    columns=["naam", "regel", "waarde"],
+)
+
+planning_rules = pd.concat([person_rules, evening_rules, intern_rules, pd.DataFrame([
+    {"naam": n, "regel": sch.RULE_ZERO,
+     "waarde": ";".join(f"{r.datum.isoformat()}:{r.dienst}" for r in zero_hours[zero_hours["naam"] == n].itertuples())}
+    for n in zero_people
+], columns=["naam", "regel", "waarde"])], ignore_index=True)
 
 # Voor de planning: vrij/afwezig plus de maanden bij een ander team (WomenFC).
 unavailable = pd.concat([absences, storage.other_team_as_absences(other_team)], ignore_index=True)
 
 # --- Weken & bezetting ---------------------------------------------------------------
 
-def extra_for(d: date) -> tuple[str, str]:
-    """Extra bezetting: (reden, dienst) voor events en belangrijke wedstrijden op deze dag."""
-    reasons = list(events_by_day.get(d, [])) + [label for label, _ in big_by_day.get(d, [])]
-    if not reasons:
-        return "", ""
-    shifts_needed = [sch.EVENING] * bool(events_by_day.get(d)) + [s for _, s in big_by_day.get(d, [])]
-    return " / ".join(reasons), sch.EVENING if sch.EVENING in shifts_needed else shifts_needed[0]
+def match_extras() -> dict[date, list[tuple]]:
+    """Extra bezetting per dag uit de tabel 'Extra staffing for matches & events':
+    {datum: [(dienst, kanaal, aantal, reden), ...]}. Per regel telt een dienst één keer mee."""
+    extras: dict[date, list[tuple]] = {}
+    seen = set()
+
+    def add(day, dienst, rule, reason):
+        if day not in period or dienst not in (sch.DAY, sch.EVENING) or (day, dienst, rule.Index) in seen:
+            return  # nachtwedstrijden: de nachtdienst is handmatig
+        if day in ucl_days and dienst == sch.EVENING:
+            return  # Champions League-avond: vaste bezetting (Staffing per day type), geen extra's erbovenop
+        seen.add((day, dienst, rule.Index))
+        for kanaal in sch.CHANNELS:
+            if int(getattr(rule, kanaal)):
+                extras.setdefault(day, []).append((dienst, kanaal, int(getattr(rule, kanaal)), reason))
+
+    for rule in match_staffing.itertuples():
+        if rule.aanleiding == sch.TRIGGER_EVENT:
+            for day, titles in events_by_day.items():
+                add(day, sch.EVENING, rule, " / ".join(titles))
+        if games is None:
+            continue
+        if rule.aanleiding == sch.TRIGGER_BIG:
+            for g in matches.big_matches(games, clubs, sch.TOP_CLUBS):
+                add(g.datum, calendar_view.game_shift(g.tijd), rule, f"{g.HomeTeam} – {g.AwayTeam}")
+        elif rule.aanleiding == sch.TRIGGER_TEAM and rule.waarde:
+            for g in games.itertuples():
+                if matches.is_club(g.HomeTeam, rule.waarde) or matches.is_club(g.AwayTeam, rule.waarde):
+                    add(g.datum, calendar_view.game_shift(g.tijd), rule, f"{rule.waarde} plays")
+        elif rule.aanleiding == sch.TRIGGER_DUTCH and rule.waarde:
+            for g in games.itertuples():
+                dutch = next((c for c in DUTCH_CLUBS for t in (g.HomeTeam, g.AwayTeam) if matches.is_club(t, c)), None)
+                if dutch and rule.waarde.lower() in str(g.competitie or "").lower():
+                    add(g.datum, calendar_view.game_shift(g.tijd), rule, f"{dutch} in {rule.waarde}")
+        elif rule.aanleiding == sch.TRIGGER_COMPETITION and rule.waarde:
+            for g in games.itertuples():
+                if rule.waarde.lower() in str(g.competitie or "").lower():
+                    add(g.datum, calendar_view.game_shift(g.tijd), rule, rule.waarde)
+    return extras
 
 
 def build_period_calendar(days: pd.DataFrame) -> pd.DataFrame:
@@ -319,7 +556,8 @@ def build_period_calendar(days: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for d in period:
         manual = stored.at[d, "handmatig"] if d in stored.index else ""
-        reason, extra_shift = extra_for(d)
+        reason = " / ".join(dict.fromkeys(f"{x[3]} (+{sch.CHANNEL_LABELS[x[1]]} {x[0].lower()})"
+                                          for x in extras_by_day.get(d, [])))
         rows.append({
             "datum": d,
             "week": d.isocalendar()[1],
@@ -327,11 +565,16 @@ def build_period_calendar(days: pd.DataFrame) -> pd.DataFrame:
             "auto": sch.auto_day_type(d, ucl_days),
             "handmatig": manual if manual in day_types else "",
             "extra": reason,
-            "extra_dienst": extra_shift,
             "notitie": stored.at[d, "notitie"] if d in stored.index else "",
         })
     return pd.DataFrame(rows)
 
+
+extras_by_day = match_extras()
+games_per_shift: dict[date, dict[str, int]] = {}
+for g in (games.itertuples() if games is not None else []):
+    shift = calendar_view.game_shift(g.tijd)
+    games_per_shift.setdefault(g.datum, {})[shift] = games_per_shift.get(g.datum, {}).get(shift, 0) + 1
 
 with t_weeks:
     st.subheader("Weeks & staffing")
@@ -363,7 +606,12 @@ with t_weeks:
     edited["handmatig"] = edited["handmatig"].fillna("")
     edited["notitie"] = edited["notitie"].fillna("")
     persist("days", merge_range(all_days, edited, period))
-    calendar = edited.assign(dagtype=edited["handmatig"].where(edited["handmatig"] != "", edited["auto"]))
+    calendar = edited.assign(
+        dagtype=edited["handmatig"].where(edited["handmatig"] != "", edited["auto"]),
+        extras=edited["datum"].map(lambda d: extras_by_day.get(d, [])),
+        # Aantal wedstrijden per dienst: extra mensen (aanvullen tot contract) gaan waar het druk is.
+        wedstrijden=edited["datum"].map(lambda d: games_per_shift.get(d, {})),
+    )
 
     # Benodigde bezetting per week vs. beschikbare capaciteit.
     need = sch.requirements(calendar, rules)
@@ -376,7 +624,8 @@ with t_weeks:
             free = sch.parse_free_days(p.vrije_dagen)
             available = sum(
                 d.weekday() not in free
-                and not ((unavailable["naam"] == p.naam) & (unavailable["van"] <= d) & (unavailable["tot"] >= d)).any()
+                and not ((unavailable["naam"] == p.naam) & (unavailable["van"] <= d) & (unavailable["tot"] >= d)
+                         & (unavailable["deel"] == "")).any()
                 for d in days
             )
             cap += min(p.max_per_week, available)
@@ -399,176 +648,53 @@ with t_weeks:
 # --- Rooster -------------------------------------------------------------------------
 
 def neighbours(full: pd.DataFrame) -> pd.DataFrame:
-    """Diensten vlak voor en na de periode: die tellen mee voor de rusttijd."""
-    edge = {start - timedelta(days=1), end + timedelta(days=1)}
-    return full[full["datum"].isin(edge)]
+    """Diensten rond de maand (de rest van de gedeelde weken en de dag ervoor/erna):
+    die tellen mee voor de rusttijd en het aantal diensten per week."""
+    around = (set(period) | {start - timedelta(days=1), end + timedelta(days=1)}) - set(month_days)
+    return full[full["datum"].isin(around)]
 
 
-def plan(full: pd.DataFrame, keep: pd.DataFrame | None = None, variant: int | None = None) -> pd.DataFrame:
-    """Roostervoorstel voor de periode dat nergens tegen een regel ingaat.
-
-    `keep`: diensten die moeten blijven staan (bij Fix); de planner vult alleen de rest aan.
-    """
+def make_month_schedule(full: pd.DataFrame, variant: int) -> pd.DataFrame:
+    """Rooster voor de dagen van de gekozen maand dat nergens tegen een regel ingaat; slaat het op."""
     context = neighbours(full)
-    existing = pd.concat([context, keep], ignore_index=True) if keep is not None else context
-    proposal = sch.generate_schedule(team, shifts, rules, calendar, unavailable, settings["min_rust_uren"],
-                                     int(seed if variant is None else variant), existing=existing)
-    # Vangnet: wat toch zou botsen (bijv. met een dienst vlak voor de periode) gaat eruit.
-    return sch.drop_conflicts(proposal, team, shifts, unavailable, settings["min_rust_uren"], context)
+    proposal = sch.generate_schedule(team, shifts, rules, calendar[calendar["datum"].isin(month_days)], unavailable,
+                                     settings["min_rust_uren"], variant, existing=context, person_rules=planning_rules)
+    # Vangnet: wat toch zou botsen (bijv. met een dienst vlak voor de maand) gaat eruit.
+    proposal = sch.drop_conflicts(proposal, team, shifts, unavailable, settings["min_rust_uren"], context, planning_rules)
+    updated = storage.clean_roster(merge_range(full, proposal, month_days))
+    persist("schedule", updated)
+    return updated
 
 
-def to_excel(sheets: dict[str, pd.DataFrame]) -> bytes:
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        for name, df in sheets.items():
-            df.to_excel(writer, sheet_name=name[:31], index=not isinstance(df.index, pd.RangeIndex))
-            ws = writer.sheets[name[:31]]
-            for column in ws.columns:
-                width = max(len(str(c.value or "")) for c in column)
-                ws.column_dimensions[column[0].column_letter].width = min(max(width + 2, 8), 50)
-    return buffer.getvalue()
+# Het rooster: geen eigen tabblad, je werkt in de matchkalender (slepen, + en ×).
+full_roster = storage.load_roster()
 
-
-STATUS_COLORS = {
-    sch.STATUS_OK: "background-color: #d9f2e3",
-    sch.STATUS_SHORT: "background-color: #f8d0d0",
-    sch.STATUS_OVER: "background-color: #dfe7fb",
-}
-
-
-def styled_status(df: pd.DataFrame):
-    return df.rename(columns=COVERAGE_LABELS).style.map(lambda v: STATUS_COLORS.get(v, ""), subset=["Status"])
-
-
-with t_roster:
-    st.subheader("Schedule")
-    full_roster = storage.load_roster()
-
-    g1, g2, g3 = st.columns([1, 1, 3], vertical_alignment="bottom")
-    seed = g1.number_input("Variant", min_value=0, value=0, step=1, help="Different number = different proposal")
-    if g2.button("✨ Generate proposal", type="primary"):
-        proposal = plan(full_roster)
-        persist("schedule", storage.clean_roster(merge_range(full_roster, proposal, period)))
-        reset_base("schedule", storage.clean_roster(proposal))
-        st.session_state["schedule_period"] = period_key
-        st.rerun()
-    g3.caption(
-        "Fixed arrangements first (UCL nights, fixed days), then the key NL shifts (Fri/Sat evening, Sun day), "
-        "the weekend, evenings and day shifts. Everyone gets at least one weekday evening and one weekend shift "
-        "where possible, and weekend shifts rotate. A new proposal overwrites the schedule for this period."
-    )
-
-    if st.session_state.get("schedule_period") != period_key:
-        st.session_state["schedule_period"] = period_key
-        reset_base("schedule", full_roster[full_roster["datum"].isin(period)].reset_index(drop=True))
-
-    with st.expander("✏️ Edit manually", expanded=False):
-        st.caption("Add or remove rows; the checks below and the match calendar update immediately.")
-        roster = st.data_editor(
-            st.session_state["schedule_base"],
-            key=editor_key("schedule"),
-            num_rows="dynamic",
-            hide_index=True,
-            width="stretch",
-            height=400,
-            column_config={
-                "datum": st.column_config.DateColumn("Date", format="DD-MM-YYYY", min_value=start, max_value=end, required=True),
-                "dienst": st.column_config.SelectboxColumn("Shift", options=shift_names, required=True),
-                "kanaal": st.column_config.SelectboxColumn("Channel", options=sch.CHANNELS, required=True),
-                "naam": st.column_config.SelectboxColumn("Name", options=list(team["naam"]), required=True),
-            },
-        )
-    roster = storage.clean_roster(roster)
-    persist("schedule", storage.clean_roster(merge_range(full_roster, roster, period)))
-
-    if roster.empty:
-        st.info("No schedule for this period yet. Click **Generate proposal**.")
+# Knop bovenaan: rooster maken voor de maand (met bevestiging als er al een rooster staat).
+if st.session_state.get("make_month") == month:
+    has_schedule = full_roster["datum"].isin(month_days).any()
+    if has_schedule and not st.session_state.get("make_month_confirmed"):
+        with mc3:
+            st.warning(f"There is already a schedule in {month_label}. Replace it?")
+            y, n = st.columns(2)
+            if y.button("Yes, replace", type="primary", use_container_width=True):
+                st.session_state["make_month_confirmed"] = True
+                st.rerun()
+            if n.button("Cancel", use_container_width=True):
+                st.session_state.pop("make_month")
+                st.rerun()
     else:
-        coverage = sch.check_coverage(roster, rules, calendar)
-        conflicts = sch.check_conflicts(roster, team, shifts, unavailable, settings["min_rust_uren"], period)
-        # Extra mensen (bijv. om aan de contracturen te komen) zijn geen probleem; alleen tekorten tonen.
-        problems = coverage[coverage["status"] == sch.STATUS_SHORT]
+        updated = make_month_schedule(full_roster, 0)
+        reset_base("schedule", updated[updated["datum"].isin(period)].reset_index(drop=True))
+        st.session_state["schedule_period"] = period_key
+        st.session_state.pop("make_month")
+        st.session_state.pop("make_month_confirmed", None)
+        st.session_state["moved"] = (f"Schedule for {month_label} made.", True)
+        st.rerun()
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Shifts scheduled", len(roster))
-        m2.metric("Slots OK", f"{(coverage['status'] == sch.STATUS_OK).sum()} / {len(coverage)}")
-        m3.metric("Shortages", int((coverage["status"] == sch.STATUS_SHORT).sum()))
-        m4.metric("Rule conflicts", len(conflicts))
-
-        columns = [f"{s} · {sch.CHANNEL_LABELS[c]}" for s in shift_names for c in sch.CHANNELS]
-        per_day = (
-            roster.assign(kolom=roster["dienst"] + " · " + roster["kanaal"].map(sch.CHANNEL_LABELS))
-            .groupby(["datum", "kolom"])["naam"].apply(lambda x: ", ".join(sorted(x))).unstack("kolom")
-            .reindex(columns=columns)
-        )
-        per_day = calendar.set_index("datum")[["dagtype", "extra"]].join(per_day).fillna("")
-        for row in coverage[coverage["status"] == sch.STATUS_SHORT].itertuples():
-            col = f"{row.dienst} · {row.kanaal}"
-            if col in per_day.columns:
-                per_day.at[row.datum, col] = f"{per_day.at[row.datum, col]}  ⚠ {row.nodig - row.ingepland} short".strip()
-        per_day.index = [day_label(d) for d in per_day.index]
-        per_day = per_day.rename(columns={"dagtype": "Day type", "extra": "Extra for"})
-
-        per_person = roster.assign(
-            dag=roster["datum"].map(day_label),
-            cel=roster["dienst"] + " (" + roster["kanaal"].map(sch.CHANNEL_LABELS) + ")",
-        ).pivot_table(index="naam", columns="dag", values="cel", aggfunc=lambda x: " + ".join(x))
-        per_person = per_person.reindex(
-            index=[n for n in team["naam"] if n in per_person.index] + [n for n in per_person.index if n not in set(team["naam"])],
-            columns=[day_label(d) for d in period],
-        ).fillna("")
-        per_person.index.name = "Name"
-        per_person.columns.name = None
-
-        weekend = roster["datum"].map(sch.is_weekend)
-        summary = pd.crosstab(roster["naam"], roster["dienst"]).reindex(columns=shift_names, fill_value=0)
-        summary = summary.join(
-            pd.crosstab(roster["naam"], roster["kanaal"]).reindex(columns=sch.CHANNELS, fill_value=0)
-            .rename(columns=sch.CHANNEL_LABELS)
-        )
-        summary.insert(0, "Total", summary[shift_names].sum(axis=1))
-        summary.insert(1, "Weekend", roster[weekend].groupby("naam").size())
-        summary.insert(2, "Weekday evenings", roster[~weekend & (roster["dienst"] == sch.EVENING)].groupby("naam").size())
-        summary.insert(3, "Sat evening", roster[(roster["datum"].map(lambda d: d.weekday()) == sch.SATURDAY)
-                                               & (roster["dienst"] == sch.EVENING)].groupby("naam").size())
-        summary = team.set_index("naam")[["max_per_week"]].join(summary, how="left").fillna(0).astype(int)
-        summary["Avg. per week"] = (summary["Total"] / int(weeks)).round(1)
-        summary = summary.rename(columns={"max_per_week": "Max / week"})
-        summary.index.name = "Name"
-
-        v_day, v_person, v_check, v_split = st.tabs(["Per day", "Per person", "Staffing check", "Distribution"])
-        with v_day:
-            st.dataframe(per_day, width="stretch", height=min(38 + 35 * len(per_day), 800))
-        with v_person:
-            st.dataframe(per_person, width="stretch")
-        with v_check:
-            if problems.empty and conflicts.empty:
-                st.success("All shifts are properly staffed and there are no conflicts. 🎉")
-            if not problems.empty:
-                st.markdown("**Staffing issues**")
-                st.dataframe(styled_status(problems), hide_index=True, width="stretch", column_config={"Date": DATE})
-            if not conflicts.empty:
-                st.markdown("**Rule conflicts**")
-                st.dataframe(conflicts.rename(columns=CONFLICT_LABELS), hide_index=True, width="stretch",
-                             column_config={"Date": DATE})
-            with st.expander("All shifts"):
-                st.dataframe(styled_status(coverage), hide_index=True, width="stretch", column_config={"Date": DATE})
-        with v_split:
-            st.caption("How the shifts are spread across the team.")
-            st.dataframe(summary, width="stretch")
-
-        st.download_button(
-            "⬇️ Download as Excel",
-            data=to_excel({
-                "Schedule per day": per_day,
-                "Per person": per_person,
-                "Distribution": summary,
-                "Staffing": coverage.rename(columns=COVERAGE_LABELS),
-                "Conflicts": conflicts.rename(columns=CONFLICT_LABELS),
-            }),
-            file_name=f"schedule_week{start.isocalendar()[1]}-{end.isocalendar()[1]}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+if st.session_state.get("schedule_period") != period_key:
+    st.session_state["schedule_period"] = period_key
+    reset_base("schedule", full_roster[full_roster["datum"].isin(period)].reset_index(drop=True))
+roster = storage.clean_roster(st.session_state["schedule_base"])
 
 # --- Wedstrijdkalender (als laatste: dan staat het rooster van deze run er al in) ----
 # Een eigen component, zodat je mensen naar een andere dienst kunt slepen: de browser stuurt
@@ -593,8 +719,28 @@ export default function({ data, parentElement, setTriggerValue }) {
     });
   });
 
-  root.querySelectorAll(".mc-add").forEach((plus) => {
-    plus.addEventListener("click", () => {
+  // Iemand toevoegen: via + (kanaal naar keuze) of door op een rode "open"-plek te klikken (kanaal staat vast).
+  // Rode "open"-plek: kies uit de mensen die die dienst volgens alle regels echt kunnen doen.
+  const openHolePicker = (hole) => {
+      const row = hole.closest("[data-drop-date]");
+      const key = `${row.dataset.dropDate}|${row.dataset.dropShift}|${hole.dataset.openChannel}`;
+      const names = (data.open_candidates || {})[key] || [];
+      const select = document.createElement("select");
+      select.className = "mc-picker";
+      select.innerHTML = names.length
+        ? '<option value="">Choose who…</option>' + names.map((n) => `<option value="${n}">${n}</option>`).join("")
+        : '<option value="">Nobody can work this by the rules</option>';
+      select.addEventListener("change", () => {
+        if (select.value) setTriggerValue("move", { name: select.value, from_date: null, from_shift: null,
+          channel: hole.dataset.openChannel, to_date: row.dataset.dropDate, to_shift: row.dataset.dropShift });
+      });
+      select.addEventListener("keydown", (e) => { if (e.key === "Escape") select.replaceWith(hole); });
+      select.addEventListener("blur", () => setTimeout(() => { if (select.isConnected) select.replaceWith(hole); }, 200));
+      hole.replaceWith(select);
+      select.focus();
+  };
+
+  const openPicker = (plus, presetChannel) => {
       const row = plus.closest("[data-drop-date]");
       // Naam typen (met suggesties) en een kanaal kiezen; Enter voegt toe, Esc annuleert.
       const box = document.createElement("span");
@@ -610,6 +756,7 @@ export default function({ data, parentElement, setTriggerValue }) {
       channel.className = "mc-picker";
       channel.innerHTML = '<option value="">Auto</option>' +
         Object.entries(data.channels).map(([c, label]) => `<option value="${c}">${label}</option>`).join("");
+      if (presetChannel) channel.value = presetChannel;
       box.append(picker, channel, list);
       const match = () => {
         const typed = picker.value.trim().toLowerCase();
@@ -632,12 +779,17 @@ export default function({ data, parentElement, setTriggerValue }) {
       // Naam en kanaal ingevuld: meteen in de dienst zetten.
       channel.addEventListener("change", () => { if (match()) add(); else picker.focus(); });
       picker.addEventListener("change", () => { if (match() && channel.value) add(); });
+      picker.addEventListener("input", () => { if (presetChannel && data.people.includes(picker.value)) add(); });
       // Klik buiten het vakje: sluiten (niet als je van naam naar kanaal gaat).
       box.addEventListener("focusout", () => setTimeout(() => { if (!box.matches(":focus-within")) close(); }, 200));
       plus.replaceWith(box);
       picker.focus();
-    });
-  });
+  };
+  root.querySelectorAll(".mc-add").forEach((plus) => plus.addEventListener("click", () => openPicker(plus, null)));
+  root.querySelectorAll(".mc-open").forEach((hole) => hole.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openHolePicker(hole);
+  }));
 
   // Op het kanaal-label (M / A / NL) klikken: kanaal van die persoon in die dienst wijzigen.
   root.querySelectorAll(".mc-chip[data-date] > i").forEach((label) => {
@@ -714,6 +866,71 @@ def pick_channel(name: str, day: date, dienst: str) -> str:
     return options[0]
 
 
+# Regels die de planner volgt, maar die je met de hand wel mag doorbreken (je krijgt alleen een waarschuwing).
+MANUAL_ALLOWED = ("Two weekends in a row",)
+
+
+def manual_ok(problem: str) -> bool:
+    return problem.startswith(MANUAL_ALLOWED)
+
+
+def new_rule_breaks(before: pd.DataFrame, after: pd.DataFrame, include_allowed: bool = False) -> list[str]:
+    """Persoonsregels die door een wijziging nieuw gebroken worden (zonder MANUAL_ALLOWED, tenzij gevraagd)."""
+    def breaks(df):
+        found = sch.check_conflicts(df, team, shifts, unavailable, settings["min_rust_uren"], person_rules=planning_rules)
+        return {f"{r.probleem} ({r.datum})" for r in found.itertuples() if pd.notna(r.datum)}
+    new = sorted(breaks(after) - breaks(before))
+    return new if include_allowed else [p for p in new if not manual_ok(p)]
+
+
+def open_candidates(missing: dict) -> dict[str, list[str]]:
+    """Per open plek ("datum|dienst|kanaal") wie die dienst volgens alle regels echt kan doen."""
+    def adds_problem(name, day, dienst, kanaal) -> bool:
+        # Snel: alleen de diensten van die persoon en van die dag bekijken (niet het hele rooster).
+        part = roster[(roster["naam"] == name) | (roster["datum"] == day)]
+        new_row = pd.DataFrame([{"datum": day, "dienst": dienst, "kanaal": kanaal, "naam": name}])
+        return bool(new_rule_breaks(part, pd.concat([part, new_row], ignore_index=True)))
+
+    result = {}
+    for (day, dienst), channels in missing.items():
+        here = roster[(roster["datum"] == day) & (roster["dienst"] == dienst)]
+        crew = list(zip(here["naam"], here["kanaal"]))
+        for kanaal in channels:
+            result[f"{day.isoformat()}|{dienst}|{kanaal}"] = [
+                n for n in active["naam"]
+                if sch.assignment_problem(n, day, dienst, kanaal, roster, team, shifts, unavailable,
+                                          settings["min_rust_uren"]) is None
+                and not sch.rule_breaks(n, day, dienst, kanaal, crew, planning_rules)
+                and not adds_problem(n, day, dienst, kanaal)
+            ]
+    return result
+
+
+def explain_hours(name: str, days: list[date]) -> str:
+    """Waarom heeft `name` op de vrije dagen van deze week geen dienst? (tooltip in de urenkolom)"""
+    channels = sch.channels_of(team.set_index("naam")["kanalen"].get(name, "")) or sch.CHANNELS
+    worked = set(roster.loc[roster["naam"] == name, "datum"])
+    lines = []
+    for d in days:
+        if d in worked or d < today:
+            continue
+        reasons = []
+        for shift in (sch.DAY, sch.EVENING):
+            for k in channels:
+                problem = sch.assignment_problem(name, d, shift, k, roster, team, shifts, unavailable,
+                                                 settings["min_rust_uren"])
+                if problem is None:
+                    here = roster[(roster["datum"] == d) & (roster["dienst"] == shift)]
+                    broken = sch.rule_breaks(name, d, shift, k, list(zip(here["naam"], here["kanaal"])), planning_rules)
+                    problem = broken[0] if broken else None
+                if problem is None:
+                    reasons.insert(0, f"could do {shift} on {sch.CHANNEL_LABELS[k]} (drag or + to add)")
+                    break
+                reasons.append(problem.replace(f"{name} ", ""))
+        lines.append(f"{sch.WEEKDAYS[d.weekday()]}: {reasons[0] if reasons else '-'}")
+    return "\n".join(lines)
+
+
 def apply_move(move: dict) -> tuple[str, bool]:
     """Verplaats (of verwijder) iemand in het rooster en sla het op.
 
@@ -730,6 +947,9 @@ def apply_move(move: dict) -> tuple[str, bool]:
             return f"Not possible: {name} does not work on {sch.CHANNEL_LABELS.get(move['new_channel'], move['new_channel'])}", False
         updated.loc[updated[row].index[:1], "kanaal"] = move["new_channel"]
         updated = storage.clean_roster(updated.drop_duplicates())
+        new = new_rule_breaks(roster, updated)
+        if new:
+            return f"Not possible: {new[0]}", False
         persist("schedule", storage.clean_roster(merge_range(storage.load_roster(), updated, period)))
         reset_base("schedule", updated)
         return f"{name} → {sch.CHANNEL_LABELS.get(move['new_channel'], move['new_channel'])} on {day_label(day)} {move['from_shift']}", True
@@ -757,8 +977,14 @@ def apply_move(move: dict) -> tuple[str, bool]:
     else:
         message = f"{name} removed from {day_label(date.fromisoformat(move['from_date']))} {move['from_shift']}"
     updated = storage.clean_roster(updated.drop_duplicates())
+    new = new_rule_breaks(roster, updated, include_allowed=True)
+    blocking = [p for p in new if not manual_ok(p)]
+    if blocking:
+        return f"Not possible: {blocking[0]}", False
     persist("schedule", storage.clean_roster(merge_range(storage.load_roster(), updated, period)))
     reset_base("schedule", updated)
+    if new:  # mag wel, maar laat zien welke planregel je doorbreekt
+        return f"{message} — note: {new[0].split(' (')[0].lower()}", True
     return message, True
 
 
@@ -786,37 +1012,37 @@ with t_matches:
         if "moved" in st.session_state:
             message, ok = st.session_state.pop("moved")
             st.toast(message, icon="✅" if ok else "⛔")
-        clashes = sch.check_conflicts(pd.concat([neighbours(storage.load_roster()), roster], ignore_index=True),
-                                      team, shifts, unavailable, settings["min_rust_uren"])
-        clashes = clashes[clashes["datum"].notna() & clashes["datum"].isin(period)]
-        if not clashes.empty:
-            w1, w2 = st.columns([4, 1], vertical_alignment="center")
-            w1.warning(f"{len(clashes)} shift(s) break the rules (red in the calendar). "
-                       "**Fix** removes only those and fills the gaps again by the rules.")
-            if w2.button("🛠 Fix", type="primary", use_container_width=True):
-                full = storage.load_roster()
-                valid = sch.drop_conflicts(roster, team, shifts, unavailable, settings["min_rust_uren"], neighbours(full))
-                fixed = plan(full, keep=valid, variant=0)
-                persist("schedule", storage.clean_roster(merge_range(full, fixed, period)))
-                reset_base("schedule", storage.clean_roster(fixed))
-                st.session_state["moved"] = (f"Fixed: {len(roster) - len(valid)} shift(s) removed, gaps filled again", True)
-                st.rerun()
+        # Lege plekken in wat al gepland is (week én maand met een rooster): rode "open"-chip in de kalender.
+        missing = {}
+        if not roster.empty:
+            planned_months = set(roster["datum"].map(lambda d: (d.year, d.month)))
+            planned_weeks = set(roster["datum"].map(sch.week_key))
+            planned_days = [d for d in period if (d.year, d.month) in planned_months and sch.week_key(d) in planned_weeks]
+            coverage = sch.check_coverage(roster, rules, calendar[calendar["datum"].isin(planned_days)], planning_rules)
+            label_to_channel = {v: k for k, v in sch.CHANNEL_LABELS.items()}
+            for c in coverage[coverage["status"] == sch.STATUS_SHORT].itertuples():
+                why = f"{c.dagtype}" + (f" + {c.reden}" if c.reden else "")
+                missing.setdefault((c.datum, c.dienst), {})[label_to_channel.get(c.kanaal, c.kanaal)] = (c.nodig - c.ingepland, why)
         # Wat nu al niet klopt in het rooster (bijv. te weinig rust) krijgt een rode rand in de kalender.
         flags = {}
-        for c in sch.check_conflicts(roster, team, shifts, unavailable, settings["min_rust_uren"]).itertuples():
-            if pd.notna(c.datum):
+        for c in sch.check_conflicts(roster, team, shifts, unavailable, settings["min_rust_uren"],
+                                     person_rules=planning_rules).itertuples():
+            if pd.notna(c.datum) and not manual_ok(c.probleem):
                 flags.setdefault((c.datum, c.naam), []).append(c.probleem)
         html = calendar_view.render(
             games, period, dict(zip(calendar["datum"], calendar["dagtype"])), urls,
             now=pd.Timestamp.now(tz=matches.LOCAL_TZ).to_pydatetime(), clubs=clubs, league_urls=league_urls,
-            events=events_by_day, roster=roster, flags=flags,
-            contracts=dict(zip(active["naam"], active["contracturen"])),
-            away={n: {d for r in g.itertuples() for d in period if r.van <= d <= r.tot}
+            events=events_by_day, roster=roster, flags=flags, missing=missing, explain=explain_hours,
+            # Alleen wie meedoet in het rooster (Auto schedule aan): niet Tim/Rogier of WomenFC als Auto schedule uit staat.
+            contracts={n: (0 if z else c) for n, c, z, a in
+                       zip(active["naam"], active["contracturen"], active["nuluren"], active["auto"]) if a},
+            away={n: {d for r in g.itertuples() if not r.deel for d in period if r.van <= d <= r.tot}
                   for n, g in unavailable.groupby("naam")},
             shift_hours={r.dienst: (lambda w: (w[1] - w[0]).total_seconds() / 3600)(sch.shift_window(start, r.start, r.eind))
                          for r in shifts.itertuples()},
         )
-        result = match_calendar(data={"html": html, "people": list(active["naam"]), "channels": sch.CHANNEL_LABELS},
+        result = match_calendar(data={"html": html, "people": list(active["naam"]), "channels": sch.CHANNEL_LABELS,
+                                      "open_candidates": open_candidates(missing)},
                                 key="match_calendar",
                                 on_move_change=lambda: None)
         if result.move:
