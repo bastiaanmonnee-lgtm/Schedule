@@ -18,17 +18,24 @@ DEFAULT_SETTINGS = {
 CHANNELS = ["main", "app", "nl"]
 
 TEAM_COLUMNS = [
-    "naam", "seniority", "kanalen", "contracturen", "nuluren", "auto", "geen_avond", "avond_vanaf", "avond_samen", "max_per_week", "vrije_dagen",
+    "naam", "shiftbase_id", "seniority", "kanalen", "contracturen", "nuluren", "auto", "geen_avond", "avond_vanaf", "avond_samen", "max_per_week", "vrije_dagen",
     "vaste_dienst", "vaste_dagen", "ucl", "actief", "notitie",
 ]
 _EMPLOYEES = ["Karel", "Jonathan", "Luuk", "Kadir", "Francisco", "Joshua", "Thijn",
               "Justin", "Maybel*", "Tim", "Rogier", "Mats", "Thomas*", "Arodi*"]
 _ONLY = {"Kadir": "app", "Francisco": "app", "Luuk": "app", "Jonathan": "main"}
 _MANUAL_ONLY = {"Rogier", "Tim"}  # niet automatisch inroosteren
+# Nummer van de medewerker in Shiftbase (voor het versturen van het rooster). Arodi: het nieuwste account.
+SHIFTBASE_IDS = {
+    "Aniek": "760456", "Emily": "1592456", "Francisco": "997192", "Jonathan": "1000286", "Joshua": "1494199",
+    "Justin": "1332930", "Kadir": "870467", "Karel": "1388199", "Luuk": "1494201", "Mats": "1433271",
+    "Maybel": "1568624", "Rogier": "774750", "Thijn": "1332929", "Thomas": "760457", "Tim": "760510",
+    "Arodi": "1604152",
+}
 DEFAULT_TEAM = pd.DataFrame(
     [
         {
-            "naam": n.rstrip("*"), "seniority": "Intern" if n.rstrip("*") == "Maybel" else "Medior", "kanalen": _ONLY.get(n, "main, app, nl"), "auto": n not in _MANUAL_ONLY, "geen_avond": False, "avond_vanaf": "", "avond_samen": False, "nuluren": False,
+            "naam": n.rstrip("*"), "shiftbase_id": SHIFTBASE_IDS.get(n.rstrip("*"), ""), "seniority": "Intern" if n.rstrip("*") == "Maybel" else "Medior", "kanalen": _ONLY.get(n, "main, app, nl"), "auto": n not in _MANUAL_ONLY, "geen_avond": False, "avond_vanaf": "", "avond_samen": False, "nuluren": False,
             "contracturen": 16 if n == "Thijn" else 40, "max_per_week": 5, "vrije_dagen": "",
             # Francisco werkt altijd 16:00 - 00:00 en steevast op vrijdag; Rogier staat bij UCL op main.
             "vaste_dienst": "Evening" if n == "Francisco" else "", "vaste_dagen": "fri" if n == "Francisco" else "",
@@ -140,6 +147,8 @@ def clean_team(df: pd.DataFrame) -> pd.DataFrame:
             fallback = True if col == "auto" else False if col in ("geen_avond", "nuluren", "avond_samen") else DEFAULT_TEAM[col].iloc[0] if col in ("seniority", "contracturen", "max_per_week", "actief") else ""
             df[col] = df["naam"].map(dict(zip(DEFAULT_TEAM["naam"], DEFAULT_TEAM[col]))).fillna(fallback) if "naam" in df else fallback
     df["naam"] = _text(df["naam"])
+    df["shiftbase_id"] = _text(df["shiftbase_id"]).str.replace(r"\.0$", "", regex=True)
+    df["shiftbase_id"] = df["shiftbase_id"].where(df["shiftbase_id"] != "", df["naam"].map(SHIFTBASE_IDS).fillna(""))
     df["seniority"] = _text(df["seniority"]).replace("", "Medior")
     df["kanalen"] = df["kanalen"].map(lambda v: ", ".join(channel_list(v)))
     df["contracturen"] = _ints(df["contracturen"], 0)
@@ -309,6 +318,23 @@ def load_match_staffing():
 
 def load_zero_hours():
     return clean_zero_hours(_read("zero_hours", pd.DataFrame(columns=["naam", "datum", "dienst"])))
+
+
+SENT_COLUMNS = ["shiftbase_id", "datum", "naam", "dienst", "kanaal", "verstuurd"]
+
+
+def load_sent() -> pd.DataFrame:
+    """Diensten die deze tool zelf naar Shiftbase heeft gestuurd (alleen die mogen via Undo weg)."""
+    df = _read("shiftbase_sent", pd.DataFrame(columns=SENT_COLUMNS))
+    for col in SENT_COLUMNS:
+        if col not in df:
+            df[col] = ""
+    df["datum"] = _dates(df["datum"])
+    return df[SENT_COLUMNS]
+
+
+def save_sent(df: pd.DataFrame) -> None:
+    _write("shiftbase_sent", df[SENT_COLUMNS])
 
 
 def load_roster():
